@@ -6,6 +6,8 @@ Evaluates fine-tuned MedGemma on RSNA 2024 validation set.
 import os
 import re
 import json
+import functools
+from typing import Optional
 import torch
 import numpy as np
 import pandas as pd
@@ -21,7 +23,12 @@ matplotlib.use('Agg')  # Non-interactive backend for RunPod
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from config import cfg
+from config import (
+    cfg,
+    COND_KEYS,
+    LEVEL_KEYS,
+    SEVERITY_FROM_CODE,
+)
 
 
 def load_model(model_path: str, use_finetuned: bool = True):
@@ -116,57 +123,104 @@ def run_inference(model, tokenizer, processor, image_paths, prompt: str) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True)
 
 
+@functools.lru_cache(maxsize=4096)
+def _extract_label_json(response: str) -> Optional[dict]:
+    """
+    Pull the severity matrix out of a model response. The training template
+    asks the model to emit a single JSON object; we tolerate optional code
+    fences and minor surrounding chatter. lru_cache amortises parsing across
+    the 25 condition×level lookups per sample.
+    """
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+    candidates = []
+    if fenced:
+        candidates.append(fenced.group(1))
+    # Also try the first balanced {...} block in the raw response.
+    start = response.find("{")
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(response)):
+            if response[i] == "{":
+                depth += 1
+            elif response[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(response[start:i + 1])
+                    break
+    for blob in candidates:
+        try:
+            parsed = json.loads(blob)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def parse_severity_from_response(response: str, condition: str, level: str) -> str:
-    """Extract predicted severity from model response."""
-    level_name = level.upper().replace("_", "/")
-    cond_name = condition.replace("_", " ")
-    
-    # Look for severity keywords in the context of this condition+level
-    response_lower = response.lower()
-    
-    # Find the relevant section
-    patterns = [
-        rf"{level_name}.*?{cond_name}.*?(normal|mild|moderate|severe)",
-        rf"{cond_name}.*?{level_name}.*?(normal|mild|moderate|severe)",
-        rf"{level_name}[^.]*?(normal|mild|moderate|severe)",
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, response_lower)
-        if match:
-            severity = match.group(1)
-            if severity in ["normal", "mild"]:
-                return "Normal/Mild"
-            elif severity == "moderate":
-                return "Moderate"
-            elif severity == "severe":
-                return "Severe"
-    
-    # Default to most common class if can't parse
-    return "Normal/Mild"
+    """
+    Extract predicted severity for one (condition, level) pair from a JSON
+    response. Falls back to "Normal/Mild" (majority class) when the response
+    is unparseable or missing the requested key.
+    """
+    parsed = _extract_label_json(response)
+    if not parsed:
+        return "Normal/Mild"
+
+    level_key = LEVEL_KEYS.get(level)
+    cond_key = COND_KEYS.get(condition)
+    if level_key is None or cond_key is None:
+        return "Normal/Mild"
+
+    level_data = parsed.get(level_key)
+    if not isinstance(level_data, dict):
+        return "Normal/Mild"
+
+    code = level_data.get(cond_key)
+    if code is None:
+        return "Normal/Mild"
+
+    return SEVERITY_FROM_CODE.get(str(code).strip().upper(), "Normal/Mild")
 
 
-def evaluate_model(model_path: str, use_finetuned: bool = True, 
+def _load_val_dataset() -> list:
+    """
+    Load the validation set, preferring JSONL over legacy JSON.
+    """
+    base = Path(cfg.processed_data_dir)
+    jsonl = base / "val_dataset.jsonl"
+    if jsonl.exists():
+        with open(jsonl) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    legacy = base / "val_dataset.json"
+    with open(legacy) as f:
+        return json.load(f)
+
+
+def evaluate_model(model_path: str, use_finetuned: bool = True,
                    max_samples: int = None) -> dict:
     """Run full evaluation on validation set."""
     
     model, tokenizer, processor = load_model(model_path, use_finetuned)
-    
-    # Load validation dataset
-    val_path = Path(cfg.processed_data_dir) / "val_dataset.json"
-    with open(val_path) as f:
-        val_data = json.load(f)
-    
+
+    val_data = _load_val_dataset()
+
     if max_samples:
         val_data = val_data[:max_samples]
-    
+
     print(f"Evaluating on {len(val_data)} samples...")
-    
+
+    # Eval prompt mirrors the schema embedded by data_prep so the model is
+    # asked for the same JSON it was trained to produce. Keeping these two
+    # strings in sync is important — divergence is a silent evaluation bug.
     eval_prompt = (
-        "Analyze this lumbar spine MRI and provide a detailed assessment "
-        "of all degenerative conditions present at each spinal level (L1/L2 through L5/S1). "
-        "For each level and condition (Spinal Canal Stenosis, Left/Right Neural Foraminal "
-        "Narrowing, Left/Right Subarticular Stenosis), specify: Normal/Mild, Moderate, or Severe."
+        "Classify all degenerative conditions in this lumbar spine MRI at every "
+        "spinal level (L1L2 through L5S1). Respond with one JSON object and "
+        "nothing else. Keys: L1L2/L2L3/L3L4/L4L5/L5S1. Each value is an object "
+        "with five keys: canal (Spinal Canal Stenosis), lf (Left Neural "
+        "Foraminal Narrowing), rf (Right Neural Foraminal Narrowing), ls (Left "
+        "Subarticular Stenosis), rs (Right Subarticular Stenosis). Each value "
+        "is N (Normal/Mild), M (Moderate), or S (Severe)."
     )
     
     results = []
@@ -213,32 +267,32 @@ def evaluate_model(model_path: str, use_finetuned: bool = True,
     return metrics, results
 
 
-def rsna_weighted_log_loss(
+def rsna_weighted_score_proxy(
     all_gt: list,
     all_pred_probs: list,
     weights: list = None,
 ) -> float:
     """
-    Compute the RSNA 2024 competition weighted log-loss.
+    Compute a *proxy* for the RSNA 2024 weighted log-loss.
 
-    The competition metric is the average of per-row log-losses, where each
-    row's loss is scaled by the severity weight of the ground-truth class:
-      weight[Normal/Mild] = 1, weight[Moderate] = 2, weight[Severe] = 4
+    The real competition metric is a probabilistic log-loss with class
+    weights [1, 2, 4]. A generative LM does not expose calibrated soft
+    probabilities, so we currently feed hard one-hot pseudo-probabilities
+    (see `severity_to_one_hot`). After clipping to ε that means each row
+    contributes either ≈ -log(1-ε) ≈ 0 (correct) or -log(ε) ≈ 16.1
+    (incorrect) — i.e. this number is fundamentally a weighted error rate
+    rescaled by 16.1, not a probabilistic log-loss.
 
-    BUG FIX v3.0: This function was listed in config.py (rsna_loss_weights)
-    and referenced in Section 8 as "implemented", but was entirely absent from
-    the code. Added here.
+    Treat it as a proxy. To get the real metric, expose per-severity-token
+    logits from the LM and pass real softmax probabilities here.
 
     Args:
         all_gt:        list of int ground-truth class indices (0/1/2)
         all_pred_probs: list of [p_normal, p_moderate, p_severe] arrays.
-                        For text-output models, call
-                        `severity_to_one_hot(predicted_label)` to produce
-                        hard pseudo-probabilities before scoring.
         weights:       per-class weights; defaults to cfg.rsna_loss_weights
 
     Returns:
-        scalar weighted log-loss (lower is better)
+        scalar weighted-error proxy (lower is better)
     """
     if weights is None:
         weights = cfg.rsna_loss_weights  # [1.0, 2.0, 4.0]
@@ -249,9 +303,7 @@ def rsna_weighted_log_loss(
 
     for gt_idx, pred_probs in zip(all_gt, all_pred_probs):
         pred_probs = np.array(pred_probs, dtype=np.float64)
-        # Clip to avoid log(0)
         pred_probs = np.clip(pred_probs, eps, 1 - eps)
-        # Renormalise after clipping
         pred_probs /= pred_probs.sum()
 
         row_loss = -np.log(pred_probs[gt_idx])
@@ -261,6 +313,27 @@ def rsna_weighted_log_loss(
         total_weight += row_weight
 
     return total_loss / total_weight if total_weight > 0 else float("inf")
+
+
+# Backwards-compatible alias so existing imports / dashboards keep working.
+rsna_weighted_log_loss = rsna_weighted_score_proxy
+
+
+def weighted_accuracy(all_gt: list, all_pred: list, weights: list = None) -> float:
+    """
+    Class-weighted accuracy — a more honest summary of a hard-prediction
+    setup than the log-loss proxy above. Each correct prediction is worth
+    weights[gt_class]; the result is sum(correct·weight) / sum(weight).
+    """
+    if weights is None:
+        weights = cfg.rsna_loss_weights
+    num, den = 0.0, 0.0
+    for gt, pred in zip(all_gt, all_pred):
+        w = weights[gt]
+        den += w
+        if gt == pred:
+            num += w
+    return num / den if den > 0 else 0.0
 
 
 def severity_to_one_hot(severity_str: str) -> list:
@@ -311,11 +384,16 @@ def compute_metrics(results: list) -> dict:
     metrics["overall_f1_weighted"] = f1_score(overall_gt, overall_pred, average="weighted", zero_division=0)
     metrics["overall_kappa"] = cohen_kappa_score(overall_gt, overall_pred, weights="quadratic")
 
-    # BUG FIX v3.0: Compute RSNA weighted log-loss (was missing entirely in v2).
-    # For a generative model we convert hard predicted labels to pseudo-probabilities.
+    # Hard-prediction proxy for the RSNA weighted log-loss. The "log_loss"
+    # variant is kept as an alias for any downstream dashboards still using
+    # that key, but `rsna_weighted_score_proxy` is the honest name.
     all_pred_probs = [severity_to_one_hot(cfg.severity_labels[p]) for p in overall_pred]
-    metrics["rsna_weighted_log_loss"] = rsna_weighted_log_loss(
+    metrics["rsna_weighted_score_proxy"] = rsna_weighted_score_proxy(
         overall_gt, all_pred_probs, weights=cfg.rsna_loss_weights
+    )
+    metrics["rsna_weighted_log_loss"] = metrics["rsna_weighted_score_proxy"]
+    metrics["weighted_accuracy"] = weighted_accuracy(
+        overall_gt, overall_pred, weights=cfg.rsna_loss_weights
     )
 
     metrics["condition_metrics"] = condition_metrics
@@ -376,8 +454,8 @@ def print_metrics_summary(metrics: dict, title: str = "Evaluation Results"):
     print(f"Overall Accuracy:          {metrics['overall_accuracy']:.4f}")
     print(f"Overall F1 (weighted):     {metrics['overall_f1_weighted']:.4f}")
     print(f"Overall Kappa (QW):        {metrics['overall_kappa']:.4f}")
-    # BUG FIX v3.0: rsna_weighted_log_loss is now computed — report it
-    print(f"RSNA Weighted Log-Loss:    {metrics.get('rsna_weighted_log_loss', float('nan')):.4f}  (lower is better)")
+    print(f"Weighted Accuracy:         {metrics.get('weighted_accuracy', float('nan')):.4f}  (class-weighted, higher is better)")
+    print(f"RSNA Weighted Score Proxy: {metrics.get('rsna_weighted_score_proxy', float('nan')):.4f}  (proxy for log-loss, lower is better)")
     print(f"\nPer-Condition Summary:")
     for cond in cfg.conditions:
         print(f"  {cond.replace('_', ' ').title():<40} "
@@ -392,7 +470,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", default=cfg.output_dir + "/final")
     parser.add_argument("--finetuned", action="store_true", default=True)
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--output_dir", default="/workspace/logs/evaluation_results")
+    parser.add_argument(
+        "--output_dir",
+        default=os.path.join(os.environ.get("WORKSPACE", "/workspace"), "logs", "evaluation_results"),
+    )
     args = parser.parse_args()
     
     print(f"\nEvaluating {'fine-tuned' if args.finetuned else 'base'} model...")

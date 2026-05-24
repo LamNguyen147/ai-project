@@ -5,8 +5,10 @@ Converts RSNA 2024 DICOM images to PNG + builds instruction-tuning dataset.
 Strategy:
   1. Identify series by description (Sagittal T1, Sagittal T2, Axial T2)
   2. Use label coordinates to select slices that best cover each vertebral level
-  3. Export at 896x896 to match MedGemma 1.5's native SigLIP resolution
-  4. Build multi-image instruction examples where possible
+  3. Export at cfg.image_size (square) to match MedGemma 1.5's SigLIP resolution
+  4. Emit a compact JSON answer template so the SFT loss is dominated by
+     label-bearing tokens, not prose boilerplate.
+  5. Write JSONL (one example per line) for streaming-friendly loading.
 """
 
 import os
@@ -19,7 +21,22 @@ from PIL import Image
 from pathlib import Path
 from tqdm import tqdm
 from typing import List, Optional, Dict, Tuple
-from config import cfg
+from config import (
+    cfg,
+    set_seed,
+    COND_KEYS,
+    LEVEL_KEYS,
+    SEVERITY_CODES,
+)
+
+# SigLIP patch size for MedGemma 1.5. Used to estimate vision-token cost
+# per image so we can drop examples that exceed cfg.max_seq_length before
+# they reach training.
+SIGLIP_PATCH_SIZE = 14
+# Safety margin (tokens) reserved for the chat-template wrappers (BOS/EOS,
+# role headers, etc.). Image and answer tokens must fit in
+#   cfg.max_seq_length - TOKEN_SAFETY_MARGIN.
+TOKEN_SAFETY_MARGIN = 256
 
 
 # ── Series type detection ────────────────────────────────────────────────────
@@ -77,12 +94,15 @@ def select_representative_slices(
     dcm_files: List[Path],
     coord_rows: pd.DataFrame,
     n_slices: int = 3,
+    allow_no_coords: bool = False,
 ) -> List[Path]:
     """
     Select N slices that best cover the annotated vertebral levels.
 
     coord_rows: rows from train_label_coordinates.csv for this study+series.
-    Falls back to evenly-spaced slices if no coordinates are available.
+    If `allow_no_coords` is False and no coordinates exist, returns []
+    so the caller can skip the study — we refuse to fabricate level→slice
+    mappings, which would teach the model to assert anatomy it cannot see.
     """
     total = len(dcm_files)
     if total == 0:
@@ -101,31 +121,46 @@ def select_representative_slices(
                 if 0 <= idx < len(indexed):
                     selected_indices.append(idx)
 
-            # Spread selected to cover range; if fewer than n_slices, pad with neighbors
+            # Spread the annotated slices evenly across the available range.
             if len(selected_indices) >= n_slices:
-                # Pick n_slices spread across the range
-                step = len(selected_indices) // n_slices
-                chosen = [selected_indices[i * step] for i in range(n_slices)]
+                if n_slices == 1:
+                    chosen = [selected_indices[len(selected_indices) // 2]]
+                else:
+                    positions = np.linspace(
+                        0, len(selected_indices) - 1, n_slices
+                    ).round().astype(int)
+                    chosen = [selected_indices[p] for p in positions]
             else:
-                chosen = selected_indices
-                # Pad with evenly spaced fallback
+                # Fewer annotations than requested slices: keep them all,
+                # then pad with the middle of the un-annotated range.
+                chosen = list(selected_indices)
+                mid = total // 2
+                k = 0
                 while len(chosen) < n_slices:
-                    mid = total // 2
-                    if mid not in chosen:
-                        chosen.append(mid)
-                    else:
-                        chosen.append(min(chosen) - 1 if min(chosen) > 0 else max(chosen) + 1)
-                chosen = sorted(set(max(0, min(c, total - 1)) for c in chosen))[:n_slices]
+                    cand = mid + (k if k % 2 == 0 else -k)
+                    if 0 <= cand < total and cand not in chosen:
+                        chosen.append(cand)
+                    k += 1
+                    if k > 2 * total:
+                        break
+                chosen = sorted(set(chosen))[:n_slices]
 
             return [indexed[i] for i in chosen]
 
-    # Fallback: evenly spaced slices (skipping first/last 10% which are often blank)
+    if not allow_no_coords:
+        # Refuse to invent a level-to-slice mapping.
+        return []
+
+    # Opt-in fallback for smoke tests only: evenly spaced slices (skipping
+    # first/last 10% which are often blank).
     margin = max(1, total // 10)
     usable = dcm_files[margin: total - margin]
     if len(usable) == 0:
         usable = dcm_files
-    step = max(1, len(usable) // n_slices)
-    return [usable[i * step] for i in range(min(n_slices, len(usable)))]
+    if n_slices == 1:
+        return [usable[len(usable) // 2]]
+    positions = np.linspace(0, len(usable) - 1, n_slices).round().astype(int)
+    return [usable[p] for p in positions]
 
 
 def _sort_dcm_by_instance(dcm_files: List[Path]) -> List[Path]:
@@ -191,6 +226,68 @@ def dicom_to_png(dcm_path: str, output_path: str,
 
 # ── Instruction building ──────────────────────────────────────────────────────
 
+# ── Token-budget estimator ────────────────────────────────────────────────────
+#
+# We cannot import the real processor here (data_prep runs without GPU deps),
+# but we can estimate tightly: SigLIP contributes (image_size/patch)² tokens
+# per image, and BPE text averages ~4 chars/token. Examples that exceed
+# cfg.max_seq_length - TOKEN_SAFETY_MARGIN are dropped before training.
+
+def estimate_token_cost(n_images: int, text: str, image_size: int) -> int:
+    """Conservative upper bound on the per-example token count."""
+    image_tokens = n_images * (image_size // SIGLIP_PATCH_SIZE) ** 2
+    text_tokens = len(text) // 3 + 16   # 3 chars/token (conservative)
+    return image_tokens + text_tokens
+
+
+# ── Instruction building (JSON answer template) ───────────────────────────────
+
+# Single description of the answer schema, embedded in every user prompt so the
+# model learns the contract from the data. Compact codes keep the assistant
+# output near ~100 tokens (vs ~500 for the old prose template), raising the
+# proportion of label-bearing tokens in the SFT loss.
+SCHEMA_DESCRIPTION = (
+    "Respond with one JSON object and nothing else. "
+    "Keys are spinal levels: L1L2, L2L3, L3L4, L4L5, L5S1. "
+    "Each value is an object with five condition keys: "
+    "canal=Spinal Canal Stenosis, lf=Left Neural Foraminal Narrowing, "
+    "rf=Right Neural Foraminal Narrowing, ls=Left Subarticular Stenosis, "
+    "rs=Right Subarticular Stenosis. "
+    "Each condition value is N (Normal/Mild), M (Moderate), or S (Severe). "
+    'Example: {"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},...}'
+)
+
+
+def labels_to_json(labels: Dict[str, str]) -> str:
+    """
+    Encode the 25-way severity matrix as a compact JSON string matching the
+    schema embedded in SCHEMA_DESCRIPTION.
+    """
+    matrix: Dict[str, Dict[str, str]] = {}
+    for level in cfg.levels:
+        level_key = LEVEL_KEYS[level]
+        level_data: Dict[str, str] = {}
+        for cond in cfg.conditions:
+            cond_key = COND_KEYS[cond]
+            sev = labels.get(f"{cond}_{level}")
+            if sev:
+                level_data[cond_key] = SEVERITY_CODES[sev]
+        if level_data:
+            matrix[level_key] = level_data
+    return json.dumps(matrix, separators=(",", ":"))
+
+
+def max_severity_rank(labels: Dict[str, str]) -> int:
+    """0 if every label is Normal/Mild, 1 if any Moderate, 2 if any Severe."""
+    rank = 0
+    for sev in labels.values():
+        if sev == "Severe":
+            return 2
+        if sev == "Moderate":
+            rank = max(rank, 1)
+    return rank
+
+
 def build_instruction(
     study_id: int,
     image_paths: List[str],
@@ -198,67 +295,33 @@ def build_instruction(
     labels: Dict[str, str],
 ) -> dict:
     """
-    Build a single multi-image instruction-tuning example.
+    Build a single multi-image instruction-tuning example with a JSON answer.
 
-    image_paths: list of exported PNG paths for this study
-    series_types: corresponding modality label per image (e.g. 'sagittal_t2')
-    labels: dict mapping 'condition_level' -> severity string
+    The user prompt embeds the full schema description; the assistant answer
+    is a single compact JSON object so downstream parsing is `json.loads`
+    rather than regex against multi-line prose.
     """
-    # Format the label descriptions
-    findings = []
-    for level in cfg.levels:
-        level_findings = []
-        for cond in cfg.conditions:
-            sev = labels.get(f"{cond}_{level}")
-            if sev:
-                cond_name = cond.replace("_", " ").title()
-                level_findings.append(f"- {cond_name}: {sev}")
-        if level_findings:
-            level_name = level.upper().replace("_", "/")
-            findings.append(f"\n**{level_name}:**\n" + "\n".join(level_findings))
-
-    findings_text = "\n".join(findings)
-
-    # Describe which views are provided (helps the model orient itself)
-    view_desc = ", ".join(
-        t.replace("_", " ").title() for t in series_types
-    ) if series_types else "MRI"
-
-    prompts = [
-        f"You are provided with {len(image_paths)} lumbar spine MRI image(s) "
-        f"({view_desc}). Analyze them and classify all degenerative conditions "
-        f"at each spinal level from L1/L2 to L5/S1.",
-
-        f"These lumbar spine MRI images ({view_desc}) show degenerative changes. "
-        f"For each level (L1/L2 through L5/S1), assess: Spinal Canal Stenosis, "
-        f"Left/Right Neural Foraminal Narrowing, and Left/Right Subarticular Stenosis "
-        f"as Normal/Mild, Moderate, or Severe.",
-
-        f"Review the provided {view_desc} MRI images of the lumbar spine and provide "
-        f"a structured severity classification for all five degenerative conditions "
-        f"at each of the five intervertebral levels.",
-    ]
-    user_prompt = random.choice(prompts)
-
-    # Build message content with multiple images
-    user_content = []
-    for _ in image_paths:
-        user_content.append({"type": "image"})  # one image token per image
-    user_content.append({"type": "text", "text": user_prompt})
-
-    assistant_response = (
-        f"Based on my analysis of the provided {view_desc} MRI images, "
-        f"here are the lumbar spine findings:\n"
-        f"{findings_text}\n\n"
-        f"Classification follows the standard three-tier severity grading: "
-        f"Normal/Mild, Moderate, and Severe. All five lumbar intervertebral "
-        f"levels (L1/L2 to L5/S1) were assessed."
+    view_desc = (
+        ", ".join(t.replace("_", " ").title() for t in series_types)
+        if series_types else "MRI"
     )
 
+    user_prompt = (
+        f"You are provided with {len(image_paths)} lumbar spine MRI image(s) "
+        f"({view_desc}). Classify all degenerative conditions at each spinal "
+        f"level from L1/L2 to L5/S1.\n\n{SCHEMA_DESCRIPTION}"
+    )
+
+    user_content: List[dict] = [{"type": "image"} for _ in image_paths]
+    user_content.append({"type": "text", "text": user_prompt})
+
+    assistant_response = labels_to_json(labels)
+
     return {
-        "study_id": study_id,
-        "image_paths": image_paths,        # list — multi-image support
+        "study_id": int(study_id),
+        "image_paths": image_paths,
         "series_types": series_types,
+        "max_severity": max_severity_rank(labels),
         "messages": [
             {"role": "user",    "content": user_content},
             {"role": "assistant", "content": assistant_response},
@@ -266,9 +329,32 @@ def build_instruction(
     }
 
 
+def oversample_by_severity(
+    dataset: List[dict],
+    weights: Optional[List[float]] = None,
+) -> List[dict]:
+    """
+    Duplicate examples whose worst label is Moderate (×2) or Severe (×4),
+    using `cfg.rsna_loss_weights` as duplication factors. This is the cheapest
+    way to counter the natural ~85% Normal/Mild imbalance for an SFT setup
+    that has no per-token loss weighting hook.
+    """
+    if weights is None:
+        weights = cfg.rsna_loss_weights
+    out: List[dict] = []
+    for ex in dataset:
+        k = int(round(weights[ex.get("max_severity", 0)]))
+        out.extend([ex] * max(1, k))
+    return out
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-def prepare_dataset(max_samples: Optional[int] = None):
+def prepare_dataset(
+    max_samples: Optional[int] = None,
+    allow_no_coords: bool = False,
+    oversample: bool = False,
+):
     """
     Main function to prepare the training dataset.
 
@@ -276,9 +362,16 @@ def prepare_dataset(max_samples: Optional[int] = None):
       1. Load label CSV and series description CSV
       2. Load coordinate CSV (for slice selection)
       3. For each study: identify series by type, extract representative slices
-      4. Export slices as 896x896 PNGs
-      5. Build instruction-tuning JSON
+      4. Export slices as cfg.image_size² PNGs
+      5. Build instruction-tuning JSONL
+      6. Drop examples that exceed the token budget
+      7. Optionally oversample Moderate/Severe studies
+
+    `allow_no_coords` keeps the legacy fallback (evenly spaced slices with no
+    real level→slice mapping) — only use it for smoke tests.
     """
+    set_seed(cfg.seed)
+
     print("Loading CSVs...")
     df_labels = pd.read_csv(cfg.train_csv)
     data_dir = Path(cfg.data_dir)
@@ -299,13 +392,22 @@ def prepare_dataset(max_samples: Optional[int] = None):
         print(f"  Loaded label coordinates: {len(df_coords)} rows")
     else:
         df_coords = None
-        print("  [WARN] train_label_coordinates.csv not found — will use evenly-spaced slice fallback")
+        if not allow_no_coords:
+            raise FileNotFoundError(
+                f"{coord_path} not found and allow_no_coords=False. "
+                "Pass --allow-no-coords to fall back to evenly-spaced slices "
+                "(NOT recommended outside smoke tests — fabricates level→slice "
+                "mappings and teaches the model to hallucinate anatomy)."
+            )
+        print("  [WARN] train_label_coordinates.csv not found — fabricated slice mapping enabled by --allow-no-coords")
 
-    # Create output directory for PNGs
-    png_dir = Path(cfg.processed_data_dir) / "images_896"
+    # Create output directory for PNGs (named by image_size for clarity).
+    png_dir = Path(cfg.processed_data_dir) / f"images_{cfg.image_size}"
     png_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = []
+    dataset: List[dict] = []
+    dropped_no_coords = 0
+    dropped_oversize = 0
     study_ids = df_labels["study_id"].unique()
     if max_samples:
         study_ids = study_ids[:max_samples]
@@ -401,8 +503,13 @@ def prepare_dataset(max_samples: Optional[int] = None):
 
             # Select representative slices
             chosen_slices = select_representative_slices(
-                dcm_files, coord_rows, n_slices=cfg.slices_per_series
+                dcm_files, coord_rows,
+                n_slices=cfg.slices_per_series,
+                allow_no_coords=allow_no_coords,
             )
+
+            if not chosen_slices:
+                continue  # study had no coordinates; skip (see flag above)
 
             for i, dcm_file in enumerate(chosen_slices):
                 out_name = f"{study_id}_{series_id}_{series_type}_slice{i}.png"
@@ -415,34 +522,69 @@ def prepare_dataset(max_samples: Optional[int] = None):
                 all_series_types.append(series_type)
 
         if not all_image_paths:
+            dropped_no_coords += 1
             continue
 
         # ── Build training example ────────────────────────────────────────
         example = build_instruction(study_id, all_image_paths, all_series_types, labels)
+
+        # Token-budget guard: drop examples that wouldn't fit in
+        # cfg.max_seq_length once vision + chat-template overhead is added.
+        prompt_text = ""
+        for item in example["messages"][0]["content"]:
+            if item.get("type") == "text":
+                prompt_text = item["text"]
+                break
+        answer_text = example["messages"][1]["content"]
+        est = estimate_token_cost(
+            n_images=len(all_image_paths),
+            text=prompt_text + answer_text,
+            image_size=cfg.image_size,
+        )
+        if est + TOKEN_SAFETY_MARGIN > cfg.max_seq_length:
+            dropped_oversize += 1
+            continue
+
         dataset.append(example)
 
     # ── Train / val split ─────────────────────────────────────────────────
-    random.seed(cfg.seed)
     random.shuffle(dataset)
     split = int(0.9 * len(dataset))
     train_data = dataset[:split]
     val_data = dataset[split:]
 
+    if oversample:
+        n_before = len(train_data)
+        train_data = oversample_by_severity(train_data)
+        print(f"  Oversampled train set: {n_before} → {len(train_data)} examples")
+
     out_dir = Path(cfg.processed_data_dir)
-    with open(out_dir / "train_dataset.json", "w") as f:
-        json.dump(train_data, f, indent=2, cls=NumpyEncoder)
-    with open(out_dir / "val_dataset.json", "w") as f:
-        json.dump(val_data, f, indent=2, cls=NumpyEncoder)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_path = out_dir / "train_dataset.jsonl"
+    val_path   = out_dir / "val_dataset.jsonl"
+    _write_jsonl(train_path, train_data)
+    _write_jsonl(val_path, val_data)
 
     print(f"\nDataset created:")
     print(f"  Train: {len(train_data)} examples")
     print(f"  Val:   {len(val_data)} examples")
-    avg_imgs = np.mean([len(d["image_paths"]) for d in dataset])
-    print(f"  Avg images per example: {avg_imgs:.1f}")
+    if dataset:
+        avg_imgs = float(np.mean([len(d["image_paths"]) for d in dataset]))
+        print(f"  Avg images per example: {avg_imgs:.1f}")
     print(f"  Image resolution: {cfg.image_size}×{cfg.image_size}")
+    print(f"  Dropped (no coords): {dropped_no_coords}")
+    print(f"  Dropped (over token budget @ max_seq_length={cfg.max_seq_length}): {dropped_oversize}")
     print(f"  Saved to: {out_dir}")
 
     return train_data, val_data
+
+
+def _write_jsonl(path: Path, rows: List[dict]) -> None:
+    """Write one JSON object per line. Tighter than indented JSON and lets
+    train/eval stream the dataset instead of loading hundreds of MB at once."""
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row, separators=(",", ":"), cls=NumpyEncoder) + "\n")
 
 
 if __name__ == "__main__":
@@ -450,5 +592,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit number of studies (for quick sanity checks)")
+    parser.add_argument("--allow-no-coords", action="store_true",
+                        help="Fall back to evenly-spaced slices when "
+                             "train_label_coordinates.csv is missing. Smoke tests only — "
+                             "the level→slice mapping is fabricated.")
+    parser.add_argument("--oversample", action="store_true",
+                        help="Duplicate Moderate (×2) and Severe (×4) studies in the "
+                             "training split to counter the natural class imbalance.")
     args = parser.parse_args()
-    prepare_dataset(max_samples=args.max_samples)
+    prepare_dataset(
+        max_samples=args.max_samples,
+        allow_no_coords=args.allow_no_coords,
+        oversample=args.oversample,
+    )

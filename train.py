@@ -13,41 +13,58 @@ v3.0 fixes:
 
 import os
 import json
-import torch
 from pathlib import Path
 from unsloth import FastVisionModel
 from unsloth.trainer import UnslothVisionDataCollator
 from PIL import Image
 from datasets import Dataset
-from transformers import TrainingArguments
+from transformers import TrainingArguments, EarlyStoppingCallback
 from trl import SFTTrainer
-from config import cfg
+from config import cfg, set_seed
 
 # Module-level references populated in main()
 tokenizer = None
 processor = None
 
 
-def load_dataset_from_json(json_path: str) -> Dataset:
-    """Load and format dataset for training."""
-    with open(json_path, "r") as f:
-        data = json.load(f)
+def load_dataset_file(path: str) -> Dataset:
+    """
+    Load a dataset from .jsonl (one example per line) or legacy .json (a single
+    list). JSONL is preferred — it lets us stream-load multi-GB dumps instead
+    of holding the whole list in RAM.
+    """
+    rows = []
+    p = Path(path)
+    if p.suffix == ".jsonl":
+        with open(p, "r") as f:
+            for line in f:
+                if line.strip():
+                    rows.append(json.loads(line))
+    else:
+        with open(p, "r") as f:
+            rows = json.load(f)
 
-    cleaned_data = []
-    for entry in data:
-        # Standardize 'messages' content
+    cleaned = []
+    for entry in rows:
         for msg in entry.get("messages", []):
-            # If content is just a string (common for assistant roles), wrap it in a list/dict
+            # The assistant content is now compact JSON text, but the user
+            # role keeps its list-of-parts structure. Wrap stray strings to
+            # keep the collator's expectations satisfied.
             if isinstance(msg["content"], str):
                 msg["content"] = [{"type": "text", "text": msg["content"]}]
-        
-        # Double check image_paths just in case
         if "image_paths" in entry and isinstance(entry["image_paths"], str):
             entry["image_paths"] = [entry["image_paths"]]
-            
-        cleaned_data.append(entry)
-        
-    return Dataset.from_list(data)
+        cleaned.append(entry)
+
+    return Dataset.from_list(cleaned)
+
+
+def _resolve_dataset_path(base_dir: Path, stem: str) -> Path:
+    """Prefer .jsonl, fall back to .json for backward compat."""
+    jsonl = base_dir / f"{stem}.jsonl"
+    if jsonl.exists():
+        return jsonl
+    return base_dir / f"{stem}.json"
 
 
 def convert_to_conversation(sample: dict) -> dict:
@@ -73,27 +90,51 @@ def convert_to_conversation(sample: dict) -> dict:
             print(f"  [WARN] Could not load image {p}: {e}")
 
     # If any images failed to load, rebuild the message content to match
-    # the actual number of successfully loaded images
+    # the actual number of successfully loaded images.
     messages = sample["messages"]
     if len(images) != len(image_paths):
-        user_content = []
-        for _ in images:
-            user_content.append({"type": "image"})
-        # Preserve the original text prompt
-        for item in messages[0]["content"]:
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assistant_msg = next(m for m in messages if m["role"] == "assistant")
+        user_content = [{"type": "image"} for _ in images]
+        for item in user_msg["content"]:
             if item["type"] == "text":
                 user_content.append(item)
                 break
         messages = [
             {"role": "user", "content": user_content},
-            messages[1],  # assistant turn unchanged
+            assistant_msg,
         ]
 
     return {"messages": messages, "images": images}
 
 
+def batch_transform(examples: dict) -> dict:
+    """
+    Batch-level wrapper around `convert_to_conversation` for use with
+    `Dataset.set_transform`. Unlike `Dataset.map`, `set_transform` is applied
+    lazily at `__getitem__` time inside the dataloader, so PIL images are NEVER
+    materialized into the pyarrow cache. This is critical: serialising PIL
+    Image objects via Arrow either crashes or balloons disk usage by tens of
+    GB on a real dataset.
+
+    `examples` is a dict-of-lists (one list per column, equal length).
+    Returns a dict-of-lists with the columns the collator expects.
+    """
+    keys = list(examples.keys())
+    batch_size = len(examples[keys[0]])
+    out_messages, out_images = [], []
+    for i in range(batch_size):
+        sample = {k: examples[k][i] for k in keys}
+        converted = convert_to_conversation(sample)
+        out_messages.append(converted["messages"])
+        out_images.append(converted["images"])
+    return {"messages": out_messages, "images": out_images}
+
+
 def main():
     global tokenizer, processor
+
+    set_seed(cfg.seed)
 
     print("=" * 60)
     print("MedGemma 1.5 4B Fine-tuning on RSNA 2024 Lumbar Spine")
@@ -116,14 +157,20 @@ def main():
         token=os.environ.get("HF_TOKEN")
     )
 
-    # Apply LoRA adapters
+    # Apply LoRA adapters. Which stacks get adapters is now driven by cfg,
+    # so the rtx_4090 profile can freeze the vision encoder without editing
+    # this file.
     print("\n[2/5] Applying LoRA adapters...")
+    print(f"  finetune_vision_layers:    {cfg.finetune_vision_layers}")
+    print(f"  finetune_language_layers:  {cfg.finetune_language_layers}")
+    print(f"  finetune_attention_modules:{cfg.finetune_attention_modules}")
+    print(f"  finetune_mlp_modules:      {cfg.finetune_mlp_modules}")
     model = FastVisionModel.get_peft_model(
         model,
-        finetune_vision_layers=True,     # Fine-tune vision encoder too
-        finetune_language_layers=True,   # Fine-tune language layers
-        finetune_attention_modules=True,
-        finetune_mlp_modules=True,
+        finetune_vision_layers=cfg.finetune_vision_layers,
+        finetune_language_layers=cfg.finetune_language_layers,
+        finetune_attention_modules=cfg.finetune_attention_modules,
+        finetune_mlp_modules=cfg.finetune_mlp_modules,
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
@@ -136,20 +183,21 @@ def main():
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     print(f"Total parameters:     {sum(p.numel() for p in model.parameters()):,}")
 
-    # Load datasets
+    # Load datasets (prefers .jsonl, falls back to .json)
     print("\n[3/5] Loading datasets...")
-    train_dataset_raw = load_dataset_from_json(
-        str(Path(cfg.processed_data_dir) / "train_dataset.json")
-    )
-    val_dataset_raw = load_dataset_from_json(
-        str(Path(cfg.processed_data_dir) / "val_dataset.json")
-    )
+    processed = Path(cfg.processed_data_dir)
+    train_dataset_raw = load_dataset_file(str(_resolve_dataset_path(processed, "train_dataset")))
+    val_dataset_raw   = load_dataset_file(str(_resolve_dataset_path(processed, "val_dataset")))
 
-    # BUG FIX v3.0: Convert to the format UnslothVisionDataCollator expects.
-    # This loads PIL images into memory per example and builds the correct
-    # messages structure. map() is lazy so images are loaded per batch.
-    train_dataset = train_dataset_raw.map(convert_to_conversation, batched=False)
-    val_dataset   = val_dataset_raw.map(convert_to_conversation, batched=False)
+    # Apply the message+image conversion lazily via set_transform. Using
+    # Dataset.map() here would either crash on PIL Image arrow-serialisation
+    # or write a multi-GB cache; set_transform runs per-batch at __getitem__
+    # time so PIL Images live in memory only as long as the dataloader needs
+    # them.
+    train_dataset_raw.set_transform(batch_transform)
+    val_dataset_raw.set_transform(batch_transform)
+    train_dataset = train_dataset_raw
+    val_dataset = val_dataset_raw
 
     print(f"Train examples: {len(train_dataset)}")
     print(f"Val examples:   {len(val_dataset)}")
@@ -177,7 +225,10 @@ def main():
         load_best_model_at_end=cfg.load_best_model_at_end,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        report_to=["wandb"] if os.environ.get("WANDB_API_KEY") else ["none"],
+        # HF Transformers expects the literal string "none", not the list
+        # ["none"] (which is parsed as a reporter named "none" and errors on
+        # newer versions).
+        report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
         run_name="medgemma-lumbar-spine-finetune",
         dataloader_num_workers=0,   # 0 avoids multiprocessing issues with PIL images
         remove_unused_columns=False,
@@ -205,6 +256,10 @@ def main():
         packing=False,              # Must be False for vision models
     )
 
+    # Stop training if eval loss stops improving. Pairs with
+    # load_best_model_at_end + metric_for_best_model="eval_loss" above.
+    trainer.add_callback(EarlyStoppingCallback(early_stopping_patience=3))
+
     # Train!
     print("\n[5/5] Starting training...")
     print(f"Output directory: {cfg.output_dir}")
@@ -213,7 +268,7 @@ def main():
           f"{cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps}")
 
     output_dir = Path(cfg.output_dir)
-    if (output_dir / "checkpoint-").exists() or any(output_dir.glob("checkpoint-*")):
+    if any(output_dir.glob("checkpoint-*")):
         print("Found existing checkpoint → resuming training")
         trainer_stats = trainer.train(resume_from_checkpoint=True)
     else:
@@ -224,20 +279,15 @@ def main():
     print(f"Training time: {trainer_stats.metrics['train_runtime']:.0f}s "
           f"({trainer_stats.metrics['train_runtime']/3600:.2f}h)")
 
-    # Save final model
-    print("\nSaving model...")
+    # Save adapters only. Merging into a single 16-bit checkpoint is the job
+    # of merge_and_save.py; keeping it separate means a failed merge does not
+    # destroy a successful training run.
+    print("\nSaving LoRA adapters...")
     model.save_pretrained(cfg.output_dir + "/final")
     tokenizer.save_pretrained(cfg.output_dir + "/final")
 
-    # Save as merged model (optional, larger file but easier to deploy)
-    print("Saving merged model (full weights)...")
-    model.save_pretrained_merged(
-        cfg.output_dir + "/merged",
-        tokenizer,
-        save_method="merged_16bit"  # or "lora" to save only adapters
-    )
-
-    print(f"\nModel saved to: {cfg.output_dir}")
+    print(f"\nAdapters saved to: {cfg.output_dir}/final")
+    print("Run `python merge_and_save.py` to produce a merged 16-bit model.")
     print("Fine-tuning complete!")
 
 

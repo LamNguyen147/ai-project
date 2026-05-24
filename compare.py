@@ -5,6 +5,7 @@ Generates side-by-side comparison of base MedGemma vs fine-tuned model.
 
 import os
 import json
+from typing import Optional
 import torch
 import numpy as np
 from PIL import Image
@@ -19,25 +20,42 @@ from config import cfg
 from evaluate import load_model, run_inference, parse_severity_from_response, compute_metrics
 
 
-def compare_models(num_samples: int = 20, output_dir: str = "/workspace/logs/comparison"):
+def compare_models(
+    num_samples: int = 20,
+    output_dir: Optional[str] = None,
+):
+    if output_dir is None:
+        output_dir = os.path.join(
+            os.environ.get("WORKSPACE", "/workspace"), "logs", "comparison"
+        )
     """Run both models on the same samples and compare outputs."""
     
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Load validation data
-    val_path = Path(cfg.processed_data_dir) / "val_dataset.json"
-    with open(val_path) as f:
-        val_data = json.load(f)
+    # Load validation data (prefers .jsonl, falls back to legacy .json)
+    base = Path(cfg.processed_data_dir)
+    val_jsonl = base / "val_dataset.jsonl"
+    if val_jsonl.exists():
+        with open(val_jsonl) as f:
+            val_data = [json.loads(line) for line in f if line.strip()]
+    else:
+        with open(base / "val_dataset.json") as f:
+            val_data = json.load(f)
     
     # Select diverse samples
     samples = val_data[:num_samples]
     
+    # Eval prompt mirrors the schema embedded by data_prep.SCHEMA_DESCRIPTION so
+    # the model sees the same contract at evaluation time as during training.
     eval_prompt = (
-        "Analyze this lumbar spine MRI and assess all degenerative conditions "
-        "at each spinal level (L1/L2 to L5/S1). For each level, classify: "
-        "Spinal Canal Stenosis, Left/Right Neural Foraminal Narrowing, "
-        "Left/Right Subarticular Stenosis as Normal/Mild, Moderate, or Severe."
+        "Classify all degenerative conditions in this lumbar spine MRI at every "
+        "spinal level (L1L2 through L5S1). Respond with one JSON object and "
+        "nothing else. Keys: L1L2/L2L3/L3L4/L4L5/L5S1. Each value is an object "
+        "with five keys: canal (Spinal Canal Stenosis), lf (Left Neural "
+        "Foraminal Narrowing), rf (Right Neural Foraminal Narrowing), ls (Left "
+        "Subarticular Stenosis), rs (Right Subarticular Stenosis). Each value "
+        "is N (Normal/Mild), M (Moderate), or S (Severe)."
     )
     
     # --- Run BASE model ---
@@ -140,21 +158,21 @@ def print_comparison_report(base_metrics: dict, ft_metrics: dict):
     print("="*70)
     
     metrics_to_compare = [
-        ("Overall Accuracy", "overall_accuracy"),
-        ("Overall F1 (weighted)", "overall_f1_weighted"),
-        ("Overall Kappa (QW)", "overall_kappa"),
-        ("RSNA Weighted Log-Loss", "rsna_weighted_log_loss"),  # v3.0: added
+        ("Overall Accuracy",          "overall_accuracy",          "up"),
+        ("Overall F1 (weighted)",     "overall_f1_weighted",       "up"),
+        ("Overall Kappa (QW)",        "overall_kappa",             "up"),
+        ("Weighted Accuracy",         "weighted_accuracy",         "up"),
+        ("RSNA Weighted Score Proxy", "rsna_weighted_score_proxy", "down"),
     ]
 
-    for name, key in metrics_to_compare:
+    for name, key, direction in metrics_to_compare:
         base_val = base_metrics.get(key, 0)
         ft_val = ft_metrics.get(key, 0)
         delta = ft_val - base_val
         sign = "+" if delta >= 0 else ""
-        # For log-loss lower is better — flag direction
-        direction = " (↓ better)" if key == "rsna_weighted_log_loss" else ""
+        marker = " (↑ better)" if direction == "up" else " (↓ better)"
         print(f"  {name:<35} Base: {base_val:.4f}  FT: {ft_val:.4f}  "
-              f"({sign}{delta:.4f}){direction}")
+              f"({sign}{delta:.4f}){marker}")
     
     print(f"\n  Per-Condition Kappa:")
     for cond in cfg.conditions:
