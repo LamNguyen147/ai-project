@@ -64,6 +64,31 @@ PROFILES = {
         "per_device_train_batch_size": 1,
         "bf16": True,
     },
+    "a100_80g_multimodal": {
+        # Option 1A scaled for an 80 GB card: same multi-modality coverage as
+        # demo_a100_40g, but at 1.5× linear resolution (so ~2× the spatial
+        # signal per slice — matters for small structures like foramina and
+        # subarticular recesses) and 2× LoRA capacity.
+        #
+        # Token budget: 8 slices × (672/14)² = 8 × 2304 = 18432 image tokens
+        # + ~500 text + 256 margin → max_seq_length 19456 fits comfortably.
+        # 896² with 8 slices would be ~33k tokens which OOMs activations
+        # even on 80 GB, so 672² is the sweet spot.
+        "max_seq_length": 19456,
+        "image_size": 672,
+        "finetune_vision_layers": True,
+        "slices_per_series": 3,
+        "max_series_per_study": 3,
+        "per_device_train_batch_size": 1,
+        # Halve accumulation to keep wall-clock manageable; effective batch
+        # size drops 8 → 4, which is fine because the higher-rank adapter
+        # and richer per-example signal compensate.
+        "gradient_accumulation_steps": 4,
+        "lora_r": 32,
+        "lora_alpha": 64,
+        "num_train_epochs": 5,
+        "bf16": True,
+    },
     "a100_40g": {
         # Single slice profile that fits on a 40 GB A100
         "max_seq_length": 5120,

@@ -38,9 +38,9 @@ pip install \
     "pydicom>=2.4.0" \
     "scikit-learn>=1.5.0" \
     "kaggle" \
-    "accelerate" \
-    "bitsandbytes" \
-    "peft" \
+    "accelerate>=0.34,<1.0" \
+    "bitsandbytes>=0.43.1" \
+    "peft>=0.11,<0.14" \
     "scipy" \
     "matplotlib" \
     "seaborn" \

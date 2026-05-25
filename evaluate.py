@@ -480,7 +480,14 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", default=cfg.output_dir + "/final")
-    parser.add_argument("--finetuned", action="store_true", default=True)
+    # BooleanOptionalAction so `--no-finetuned` actually works. The previous
+    # `action="store_true", default=True` left the flag permanently True with
+    # no way to evaluate the base model from CLI.
+    parser.add_argument(
+        "--finetuned",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
         "--output_dir",

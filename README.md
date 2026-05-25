@@ -9,11 +9,12 @@ Fine-tunes [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it) (
 | `PROFILE` env var      | GPU                | Image size | Modalities / slices       | `max_seq_length` | Vision LoRA |
 | ---------------------- | ------------------ | ---------- | ------------------------- | ---------------- | ----------- |
 | `demo_a100_40g` (default) | A100 40 GB         | 448²       | up to 3 series, ≤ 8 slices | 9216             | on          |
+| `a100_80g_multimodal`  | A100 80 GB         | 672²       | up to 3 series, ≤ 8 slices | 19456            | on (r=32)   |
 | `a100_80g`             | A100 80 GB         | 896²       | 1 series, 3 slices         | 13312            | on          |
 | `a100_40g`             | A100 40 GB         | 896²       | 1 series, 1 slice          | 5120             | on          |
 | `rtx_4090`             | RTX 4090 (24 GB)   | 448²       | 1 series, 1 slice          | 2048             | off         |
 
-Pick one at launch: `PROFILE=a100_80g python train.py`. Profile values override the defaults in `config.py`. When `PROFILE` is unset the `demo_a100_40g` profile is applied automatically — it is the only setup that honestly covers all 25 labels (sagittal T2 + sagittal T1 + axial T2) on a 40 GB A100. See `FINE_TUNING_PLAN.md` for the methodology behind this choice.
+Pick one at launch: `PROFILE=a100_80g_multimodal python train.py`. Profile values override the defaults in `config.py`. When `PROFILE` is unset the `demo_a100_40g` profile is applied automatically — it is the smallest setup that honestly covers all 25 labels (sagittal T2 + sagittal T1 + axial T2). On an 80 GB A100 prefer `a100_80g_multimodal`: same modality coverage at 1.5× linear resolution, LoRA rank 32, 5 epochs. See `FINE_TUNING_PLAN.md` for the methodology behind these choices.
 
 ## Setup
 
@@ -97,7 +98,7 @@ The legacy key `rsna_weighted_log_loss` is kept as an alias for backward compati
 ## Known limitations / future work
 
 - Generative classification is fragile. A classification head on pooled vision features would give calibrated probabilities and make the RSNA log-loss real (Option 3 in `FINE_TUNING_PLAN.md`; sketched as `train_head.py` in the roadmap, not implemented).
-- The `a100_40g` and `rtx_4090` profiles still use one sagittal T2 slice, so on those profiles only canal stenosis is honestly assessed — foraminal and subarticular labels are guessed from the class prior. Use `demo_a100_40g` (the default) or `a100_80g` for honest 25-label coverage.
+- The `a100_40g`, `a100_80g`, and `rtx_4090` profiles all use one series (sagittal T2 only), so on those profiles only canal stenosis is honestly assessed — foraminal and subarticular labels are guessed from the class prior. Use `demo_a100_40g` (the default) or `a100_80g_multimodal` for honest 25-label coverage.
 - `--allow-no-coords` is documented but unsafe to use for real training runs.
 - `SFTTrainer(tokenizer=…)` is deprecated in `trl ≥ 0.13`; pinned to `>= 0.11, < 0.12` in `setup.sh` so it still works. Loosening the pin will require switching to `processing_class=`.
 

@@ -67,8 +67,9 @@ RSNA DICOM files  →  data_prep.py  →  PNG (cfg.image_size²)  +  train/val_d
 All hyperparameters live in `Config` (singleton `cfg`). `__post_init__` applies the profile named by the `PROFILE` env var, e.g. `PROFILE=rtx_4090`. When `PROFILE` is unset, `demo_a100_40g` is applied automatically — the bare dataclass defaults (1 sagittal T2 slice at 896²) can only honestly assess canal stenosis, so we never fall through to them.
 
 Available profiles (see `PROFILES` dict):
-- `demo_a100_40g` (default) — 448², up to 3 series (sag T2 + sag T1 + ax T2) × ≤ 8 slices total, `max_seq_length=9216`, vision LoRA on. Option 1A from `FINE_TUNING_PLAN.md`.
-- `a100_80g` — 896², 3 slices from 1 series, `max_seq_length=13312`, vision LoRA on
+- `demo_a100_40g` (default) — 448², up to 3 series (sag T2 + sag T1 + ax T2) × ≤ 8 slices total, `max_seq_length=9216`, vision LoRA r=16. Option 1A from `FINE_TUNING_PLAN.md`. Smallest honest 25-label config.
+- `a100_80g_multimodal` — 672², same multi-modality picker as `demo_a100_40g`, `max_seq_length=19456`, vision LoRA r=32, 5 epochs. Recommended on an 80 GB A100 — same modality coverage as the demo profile at 1.5× linear resolution and 2× LoRA capacity.
+- `a100_80g` — 896², 3 slices from 1 series, `max_seq_length=13312`, vision LoRA on. Canal-stenosis specialist (sag T2 only).
 - `a100_40g` — 896², 1 slice from 1 series, `max_seq_length=5120`, vision LoRA on
 - `rtx_4090` — 448², 1 slice from 1 series, `max_seq_length=2048`, vision LoRA off
 

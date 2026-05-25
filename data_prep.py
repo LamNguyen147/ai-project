@@ -592,6 +592,14 @@ def prepare_dataset(
     coord_path = data_dir / "train_label_coordinates.csv"
     if coord_path.exists():
         df_coords = pd.read_csv(coord_path)
+        # RSNA stores level as "L1/L2"; cfg.levels uses "l1_l2". Normalise once
+        # here so every consumer (notably _pick_axial_per_level's level filter)
+        # can compare against cfg.levels directly. Without this, the axial
+        # picker silently returns [] for every study and the subarticular
+        # labels train against images that don't contain the anatomy.
+        df_coords["level"] = (
+            df_coords["level"].astype(str).str.lower().str.replace("/", "_")
+        )
         print(f"  Loaded label coordinates: {len(df_coords)} rows")
     else:
         df_coords = None
