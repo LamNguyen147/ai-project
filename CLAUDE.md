@@ -21,8 +21,9 @@ python data_prep.py --max_samples 50           # smoke test
 python data_prep.py --oversample               # duplicate Moderate ×2, Severe ×4
 python data_prep.py --allow-no-coords          # fabricated slice mapping; smoke test only
 
-# Fine-tune
-PROFILE=a100_80g python train.py               # pick a profile from config.PROFILES
+# Fine-tune (defaults to PROFILE=demo_a100_40g when unset)
+python train.py
+PROFILE=a100_80g python train.py               # override with a profile from config.PROFILES
 
 # Evaluation
 python evaluate.py --model_path $WORKSPACE/models/medgemma-lumbar/final
@@ -63,12 +64,13 @@ RSNA DICOM files  →  data_prep.py  →  PNG (cfg.image_size²)  +  train/val_d
 
 ### Config (`config.py`)
 
-All hyperparameters live in `Config` (singleton `cfg`). `__post_init__` applies the profile named by the `PROFILE` env var, e.g. `PROFILE=rtx_4090`.
+All hyperparameters live in `Config` (singleton `cfg`). `__post_init__` applies the profile named by the `PROFILE` env var, e.g. `PROFILE=rtx_4090`. When `PROFILE` is unset, `demo_a100_40g` is applied automatically — the bare dataclass defaults (1 sagittal T2 slice at 896²) can only honestly assess canal stenosis, so we never fall through to them.
 
 Available profiles (see `PROFILES` dict):
-- `a100_80g` — 896², 3 slices/study, `max_seq_length=13312`, vision LoRA on
-- `a100_40g` — 896², 1 slice/study, `max_seq_length=5120`, vision LoRA on
-- `rtx_4090` — 448², 1 slice/study, `max_seq_length=2048`, vision LoRA off
+- `demo_a100_40g` (default) — 448², up to 3 series (sag T2 + sag T1 + ax T2) × ≤ 8 slices total, `max_seq_length=9216`, vision LoRA on. Option 1A from `FINE_TUNING_PLAN.md`.
+- `a100_80g` — 896², 3 slices from 1 series, `max_seq_length=13312`, vision LoRA on
+- `a100_40g` — 896², 1 slice from 1 series, `max_seq_length=5120`, vision LoRA on
+- `rtx_4090` — 448², 1 slice from 1 series, `max_seq_length=2048`, vision LoRA off
 
 Key invariants encoded in the defaults:
 - `cfg.max_seq_length` must exceed `(image_size/14)² × n_images + ~1024 (prompt+answer+chat-template overhead)`, otherwise the assistant label gets truncated and SFT loss collapses. `data_prep.py` estimates this per example and drops oversized ones.
@@ -94,7 +96,7 @@ The assistant target produced by `data_prep.build_instruction` is a single compa
 {"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}, ..., "L5S1":{...}}
 ```
 
-`evaluate.parse_severity_from_response` parses model output via `json.loads` (with a balanced-brace extractor for chatty outputs), not regex. The eval prompt in `evaluate.py` / `compare.py` embeds the schema — keep it synchronised with `data_prep.SCHEMA_DESCRIPTION` or evaluation will silently diverge from training.
+`evaluate.parse_severity_from_response` parses model output via `json.loads` (with a balanced-brace extractor for chatty outputs), not regex. The user-turn prompt is built by `data_prep.build_user_prompt(n_images, series_types)`; `build_instruction`, `evaluate.evaluate_model`, and `compare.compare_models` all call it so the training prompt and eval prompt cannot drift. Never hand-roll the eval prompt — use the helper.
 
 ### Dataset files
 
@@ -117,8 +119,11 @@ The assistant target produced by `data_prep.build_instruction` is a single compa
 
 - `train.py` uses `Dataset.set_transform`, NOT `Dataset.map`. PIL images are loaded lazily per batch; using `.map` here would either crash on PyArrow serialisation or write a multi-GB cache.
 - The Unsloth `FastVisionModel.from_pretrained` return is `(model, tokenizer)` but the "tokenizer" is actually a processor; `AutoProcessor` is loaded separately because `apply_chat_template` lives on the tokenizer half.
-- Series selection priority in `data_prep.py`: `sagittal_t2` > `sagittal_t1` > `axial_t2` > unknown.
-- `select_representative_slices` returns `[]` when no coordinates are available unless `allow_no_coords=True` — refusing to fabricate level→slice mappings is intentional.
+- `data_prep.prepare_dataset` selects series in three passes: (1) one per known modality in `SERIES_PRIORITY` order, (2) extra series of any known modality if slots remain, (3) unknown series last. This guarantees that with `max_series_per_study ≥ 3` all three modalities reach the model whenever the study has them. A simple `for stype in SERIES_PRIORITY: append all of type` loop is **wrong** — it silently drops modalities for studies with multiple sagittal_t2 series.
+- `SERIES_PRIORITY = ["sagittal_t2", "sagittal_t1", "axial_t2"]` is the ordering used by both selection passes and the multi-modality slice pickers.
+- `select_representative_slices` (single-series legacy path) returns `[]` when no coordinates are available unless `allow_no_coords=True`. The multi-modality pickers (`_pick_midline_slice`, `_pick_parasagittal_slices`, `_pick_axial_per_level`) follow the same rule. Refusing to fabricate level→slice mappings is intentional.
+- `dicom_to_png` inverts `MONOCHROME1` images and treats `WindowWidth <= 0` as a missing window (falls through to the percentile branch) — both are uncommon but real failure modes.
+- `evaluate.compute_metrics` reports `parse_failure_rate` / `parse_failure_count`. `parse_severity_from_response` silently falls back to "Normal/Mild" for unparseable responses, so without this counter unparseable base-model output looks accidentally accurate by class prior.
 
 ## Dependencies
 
@@ -128,4 +133,4 @@ Installed by `setup.sh` (pinned to API-compatible bands):
 - `pydicom`, `pillow`, `scikit-learn`, `matplotlib`, `seaborn`, `opencv-python-headless`
 - `kaggle`, `huggingface_hub`
 
-Environment variables: `HF_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY` (required); `WORKSPACE` (optional, default `/workspace`); `PROFILE` (optional, default A100 40 GB-equivalent); `WANDB_API_KEY` (optional, enables W&B reporting).
+Environment variables: `HF_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY` (required); `WORKSPACE` (optional, default `/workspace`); `PROFILE` (optional, default `demo_a100_40g`); `WANDB_API_KEY` (optional, enables W&B reporting).

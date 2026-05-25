@@ -14,9 +14,9 @@ from tqdm import tqdm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 
 from config import cfg
+from data_prep import build_user_prompt
 from evaluate import load_model, run_inference, parse_severity_from_response, compute_metrics
 
 
@@ -24,11 +24,11 @@ def compare_models(
     num_samples: int = 20,
     output_dir: Optional[str] = None,
 ):
+    """Run both models on the same samples and compare outputs."""
     if output_dir is None:
         output_dir = os.path.join(
             os.environ.get("WORKSPACE", "/workspace"), "logs", "comparison"
         )
-    """Run both models on the same samples and compare outputs."""
     
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -45,30 +45,23 @@ def compare_models(
     
     # Select diverse samples
     samples = val_data[:num_samples]
-    
-    # Eval prompt mirrors the schema embedded by data_prep.SCHEMA_DESCRIPTION so
-    # the model sees the same contract at evaluation time as during training.
-    eval_prompt = (
-        "Classify all degenerative conditions in this lumbar spine MRI at every "
-        "spinal level (L1L2 through L5S1). Respond with one JSON object and "
-        "nothing else. Keys: L1L2/L2L3/L3L4/L4L5/L5S1. Each value is an object "
-        "with five keys: canal (Spinal Canal Stenosis), lf (Left Neural "
-        "Foraminal Narrowing), rf (Right Neural Foraminal Narrowing), ls (Left "
-        "Subarticular Stenosis), rs (Right Subarticular Stenosis). Each value "
-        "is N (Normal/Mild), M (Moderate), or S (Severe)."
-    )
-    
+
     # --- Run BASE model ---
     print("Loading BASE model (MedGemma without fine-tuning)...")
     base_model, base_tokenizer, base_processor = load_model(
         model_path=cfg.model_name, use_finetuned=False
     )
-    
+
     base_results = []
     print("Running base model inference...")
     for sample in tqdm(samples):
         # BUG FIX v3.0: use image_paths (list), not image_path (str)
         image_paths = sample.get("image_paths", sample.get("image_path", []))
+        # Reconstruct the exact training prompt for this sample.
+        eval_prompt = build_user_prompt(
+            n_images=len(image_paths) if not isinstance(image_paths, str) else 1,
+            series_types=sample.get("series_types"),
+        )
         pred = run_inference(base_model, base_tokenizer, base_processor,
                            image_paths, eval_prompt)
 
@@ -105,6 +98,10 @@ def compare_models(
     for i, sample in enumerate(tqdm(samples)):
         # BUG FIX v3.0: use image_paths (list)
         image_paths = sample.get("image_paths", sample.get("image_path", []))
+        eval_prompt = build_user_prompt(
+            n_images=len(image_paths) if not isinstance(image_paths, str) else 1,
+            series_types=sample.get("series_types"),
+        )
         pred = run_inference(ft_model, ft_tokenizer, ft_processor,
                             image_paths, eval_prompt)
         
@@ -121,12 +118,17 @@ def compare_models(
     torch.cuda.empty_cache()
     
     # --- Compute metrics for both ---
-    # Reformat for compute_metrics compatibility
-    base_formatted = [{"ground_truth": r["ground_truth"], 
+    # Reformat for compute_metrics compatibility. `pred_response` is passed
+    # through so compute_metrics can compute parse_failure_rate honestly:
+    # unparseable base-model output silently maps to "Normal/Mild" and would
+    # otherwise inflate the base baseline by class prior.
+    base_formatted = [{"ground_truth": r["ground_truth"],
                        "predictions": r["base_predictions"],
+                       "pred_response": r["base_response"],
                        "study_id": r["study_id"]} for r in base_results]
-    ft_formatted = [{"ground_truth": r["ground_truth"], 
+    ft_formatted = [{"ground_truth": r["ground_truth"],
                     "predictions": r["ft_predictions"],
+                    "pred_response": r["ft_response"],
                     "study_id": r["study_id"]} for r in base_results]
     
     base_metrics = compute_metrics(base_formatted)
@@ -163,6 +165,7 @@ def print_comparison_report(base_metrics: dict, ft_metrics: dict):
         ("Overall Kappa (QW)",        "overall_kappa",             "up"),
         ("Weighted Accuracy",         "weighted_accuracy",         "up"),
         ("RSNA Weighted Score Proxy", "rsna_weighted_score_proxy", "down"),
+        ("Parse Failure Rate",        "parse_failure_rate",        "down"),
     ]
 
     for name, key, direction in metrics_to_compare:

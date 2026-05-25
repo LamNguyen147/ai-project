@@ -29,20 +29,21 @@ from config import (
     LEVEL_KEYS,
     SEVERITY_FROM_CODE,
 )
+from data_prep import build_user_prompt
 
 
 def load_model(model_path: str, use_finetuned: bool = True):
     """Load model for evaluation."""
-    
+
     if use_finetuned:
-        from peft import PeftModel
         from unsloth import FastVisionModel
-        
+
         model, tokenizer = FastVisionModel.from_pretrained(
             model_name=model_path,
             max_seq_length=cfg.max_seq_length,
             dtype=torch.float16,
             load_in_4bit=True,
+            token=os.environ.get("HF_TOKEN"),
         )
         FastVisionModel.for_inference(model)
     else:
@@ -198,7 +199,7 @@ def _load_val_dataset() -> list:
 
 
 def evaluate_model(model_path: str, use_finetuned: bool = True,
-                   max_samples: int = None) -> dict:
+                   max_samples: int = None) -> tuple:
     """Run full evaluation on validation set."""
     
     model, tokenizer, processor = load_model(model_path, use_finetuned)
@@ -210,21 +211,8 @@ def evaluate_model(model_path: str, use_finetuned: bool = True,
 
     print(f"Evaluating on {len(val_data)} samples...")
 
-    # Eval prompt mirrors the schema embedded by data_prep so the model is
-    # asked for the same JSON it was trained to produce. Keeping these two
-    # strings in sync is important — divergence is a silent evaluation bug.
-    eval_prompt = (
-        "Classify all degenerative conditions in this lumbar spine MRI at every "
-        "spinal level (L1L2 through L5S1). Respond with one JSON object and "
-        "nothing else. Keys: L1L2/L2L3/L3L4/L4L5/L5S1. Each value is an object "
-        "with five keys: canal (Spinal Canal Stenosis), lf (Left Neural "
-        "Foraminal Narrowing), rf (Right Neural Foraminal Narrowing), ls (Left "
-        "Subarticular Stenosis), rs (Right Subarticular Stenosis). Each value "
-        "is N (Normal/Mild), M (Moderate), or S (Severe)."
-    )
-    
     results = []
-    
+
     for sample in tqdm(val_data):
         # BUG FIX v3.0: dataset stores image_paths (list), not image_path (str)
         image_paths = sample.get("image_paths", sample.get("image_path", []))
@@ -233,6 +221,14 @@ def evaluate_model(model_path: str, use_finetuned: bool = True,
 
         # Get ground truth from messages
         gt_response = sample["messages"][-1]["content"]
+
+        # Use the same prompt the model was trained on. Paraphrasing here
+        # silently degrades eval quality, so we reconstruct via the shared
+        # helper instead of hardcoding the wording.
+        eval_prompt = build_user_prompt(
+            n_images=len(image_paths),
+            series_types=sample.get("series_types"),
+        )
 
         # Run inference
         pred_response = run_inference(
@@ -397,13 +393,27 @@ def compute_metrics(results: list) -> dict:
     )
 
     metrics["condition_metrics"] = condition_metrics
-    
+
     # Per-condition summary
     for cond in cfg.conditions:
         cond_keys = [f"{cond}_{l}" for l in cfg.levels]
         metrics[f"{cond}_avg_accuracy"] = np.mean([condition_metrics[k]["accuracy"] for k in cond_keys])
         metrics[f"{cond}_avg_kappa"] = np.mean([condition_metrics[k]["kappa"] for k in cond_keys])
-    
+
+    # Parse-failure rate: fraction of samples where the predicted response
+    # could not be parsed as JSON. `parse_severity_from_response` silently
+    # falls back to "Normal/Mild" for these, so without this counter an
+    # unparseable base-model run looks accidentally accurate by class prior.
+    n_parse_fail = 0
+    for r in results:
+        pred_text = r.get("pred_response", "")
+        if _extract_label_json(pred_text) is None:
+            n_parse_fail += 1
+    metrics["parse_failure_rate"] = (
+        n_parse_fail / len(results) if results else 0.0
+    )
+    metrics["parse_failure_count"] = n_parse_fail
+
     return metrics
 
 
@@ -456,6 +466,8 @@ def print_metrics_summary(metrics: dict, title: str = "Evaluation Results"):
     print(f"Overall Kappa (QW):        {metrics['overall_kappa']:.4f}")
     print(f"Weighted Accuracy:         {metrics.get('weighted_accuracy', float('nan')):.4f}  (class-weighted, higher is better)")
     print(f"RSNA Weighted Score Proxy: {metrics.get('rsna_weighted_score_proxy', float('nan')):.4f}  (proxy for log-loss, lower is better)")
+    print(f"Parse Failure Rate:        {metrics.get('parse_failure_rate', 0.0):.4f}  "
+          f"({metrics.get('parse_failure_count', 0)} unparseable responses → fell back to Normal/Mild)")
     print(f"\nPer-Condition Summary:")
     for cond in cfg.conditions:
         print(f"  {cond.replace('_', ' ').title():<40} "

@@ -6,14 +6,14 @@ Fine-tunes [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it) (
 
 ## Hardware profiles
 
-| `PROFILE` env var | GPU                     | Image size | Slices/study | `max_seq_length` | Vision LoRA |
-| ----------------- | ----------------------- | ---------- | ------------ | ---------------- | ----------- |
-| (default)         | A100 40 GB / equivalent | 896²       | 1            | 5120             | on          |
-| `a100_80g`        | A100 80 GB              | 896²       | 3            | 13312            | on          |
-| `a100_40g`        | A100 40 GB              | 896²       | 1            | 5120             | on          |
-| `rtx_4090`        | RTX 4090 (24 GB)        | 448²       | 1            | 2048             | off         |
+| `PROFILE` env var      | GPU                | Image size | Modalities / slices       | `max_seq_length` | Vision LoRA |
+| ---------------------- | ------------------ | ---------- | ------------------------- | ---------------- | ----------- |
+| `demo_a100_40g` (default) | A100 40 GB         | 448²       | up to 3 series, ≤ 8 slices | 9216             | on          |
+| `a100_80g`             | A100 80 GB         | 896²       | 1 series, 3 slices         | 13312            | on          |
+| `a100_40g`             | A100 40 GB         | 896²       | 1 series, 1 slice          | 5120             | on          |
+| `rtx_4090`             | RTX 4090 (24 GB)   | 448²       | 1 series, 1 slice          | 2048             | off         |
 
-Pick one at launch: `PROFILE=a100_80g python train.py`. Profile values override the defaults in `config.py`.
+Pick one at launch: `PROFILE=a100_80g python train.py`. Profile values override the defaults in `config.py`. When `PROFILE` is unset the `demo_a100_40g` profile is applied automatically — it is the only setup that honestly covers all 25 labels (sagittal T2 + sagittal T1 + axial T2) on a 40 GB A100. See `FINE_TUNING_PLAN.md` for the methodology behind this choice.
 
 ## Setup
 
@@ -81,7 +81,7 @@ python merge_and_save.py
 | `ls`          | Left Subarticular Stenosis         |
 | `rs`          | Right Subarticular Stenosis        |
 
-The schema is defined once in `config.py` (`COND_KEYS`, `LEVEL_KEYS`, `SEVERITY_CODES`) and imported by all scripts so the training prompt, eval prompt, and parser cannot drift apart.
+The schema is defined once in `config.py` (`COND_KEYS`, `LEVEL_KEYS`, `SEVERITY_CODES`) and imported by all scripts so the training prompt, eval prompt, and parser cannot drift apart. The user-turn text is built by a single helper `data_prep.build_user_prompt(n_images, series_types)`, which both `evaluate.py` and `compare.py` call so the model sees the exact same prompt at inference time as during SFT.
 
 ## Metrics
 
@@ -90,14 +90,16 @@ The schema is defined once in `config.py` (`COND_KEYS`, `LEVEL_KEYS`, `SEVERITY_
 - **Accuracy / F1 (weighted) / Cohen's Kappa (QW)** — standard multiclass metrics.
 - **Weighted Accuracy** — class-weighted with `[1, 2, 4]`; higher is better.
 - **RSNA Weighted Score Proxy** (`rsna_weighted_score_proxy`) — the *hard-prediction proxy* for the RSNA log-loss. Because a generative LM does not emit calibrated softmax probabilities, this number is fundamentally a weighted error rate scaled by ≈ 16.1, not a true log-loss. Treat it as a proxy.
+- **Parse Failure Rate** (`parse_failure_rate` / `parse_failure_count`) — fraction of predicted responses where no JSON object could be extracted. Unparseable responses silently fall back to "Normal/Mild" in the per-label parser, so without this counter a base-model run can look accidentally accurate by class prior alone. `compare.py` shows this row in the side-by-side report.
 
 The legacy key `rsna_weighted_log_loss` is kept as an alias for backward compatibility.
 
 ## Known limitations / future work
 
-- Generative classification is fragile. A classification head on pooled vision features would give calibrated probabilities and make the RSNA log-loss real (currently sketched as `train_head.py` in the roadmap, not implemented).
-- Default profile uses 1 slice/study, so the model is asked to predict 25 outputs from a single 2D image. The `a100_80g` profile bumps this to 3.
+- Generative classification is fragile. A classification head on pooled vision features would give calibrated probabilities and make the RSNA log-loss real (Option 3 in `FINE_TUNING_PLAN.md`; sketched as `train_head.py` in the roadmap, not implemented).
+- The `a100_40g` and `rtx_4090` profiles still use one sagittal T2 slice, so on those profiles only canal stenosis is honestly assessed — foraminal and subarticular labels are guessed from the class prior. Use `demo_a100_40g` (the default) or `a100_80g` for honest 25-label coverage.
 - `--allow-no-coords` is documented but unsafe to use for real training runs.
+- `SFTTrainer(tokenizer=…)` is deprecated in `trl ≥ 0.13`; pinned to `>= 0.11, < 0.12` in `setup.sh` so it still works. Loosening the pin will require switching to `processing_class=`.
 
 ## Repository layout
 

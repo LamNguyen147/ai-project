@@ -22,9 +22,8 @@ from transformers import TrainingArguments, EarlyStoppingCallback
 from trl import SFTTrainer
 from config import cfg, set_seed
 
-# Module-level references populated in main()
+# Module-level reference populated in main(); used by the data collator.
 tokenizer = None
-processor = None
 
 
 def load_dataset_file(path: str) -> Dataset:
@@ -132,7 +131,7 @@ def batch_transform(examples: dict) -> dict:
 
 
 def main():
-    global tokenizer, processor
+    global tokenizer
 
     set_seed(cfg.seed)
 
@@ -148,13 +147,6 @@ def main():
         dtype=None,          # Auto-detect best dtype
         load_in_4bit=True,   # QLoRA
         token=os.environ.get("HF_TOKEN"),
-    )
-
-    # Get processor for image handling
-    from transformers import AutoProcessor
-    processor = AutoProcessor.from_pretrained(
-        cfg.model_name,
-        token=os.environ.get("HF_TOKEN")
     )
 
     # Apply LoRA adapters. Which stacks get adapters is now driven by cfg,

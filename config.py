@@ -42,6 +42,18 @@ SEVERITY_FROM_CODE: Dict[str, str] = {v: k for k, v in SEVERITY_CODES.items()}
 #   PROFILE=rtx_4090 python train.py
 # Anything left out of a profile inherits the dataclass default below.
 PROFILES = {
+    "demo_a100_40g": {
+        # Option 1A: 8 targeted slices × (448/14)² = 8 × 1024 = 8192 image tokens
+        # + ~400 text tokens → fits max_seq_length=9216 on a 40 GB A100.
+        # Covers all 25 labels honestly: 1 midline sagT2 + 2 paraT1 + 5 axialT2.
+        "max_seq_length": 9216,
+        "image_size": 448,
+        "finetune_vision_layers": True,
+        "slices_per_series": 3,       # per-series fallback; real control is in multi-modality picker
+        "max_series_per_study": 3,    # sagittal T2 + sagittal T1 + axial T2
+        "per_device_train_batch_size": 1,
+        "bf16": True,
+    },
     "a100_80g": {
         # 3 sagittal slices × 4096 image tokens + ~1024 for prompt/answer
         "max_seq_length": 13312,
@@ -111,8 +123,8 @@ class Config:
     series_desc_csv: str = f"{WORKSPACE}/data/rsna-2024-lumbar-spine/train_series_descriptions.csv"
     processed_data_dir: str = f"{WORKSPACE}/data/processed"
     
-    # Image resolution — MedGemma 1.5 natively processes 896x896.
-    # Do NOT downsample below this; upsampling from smaller sizes loses detail.
+    # Image resolution. MedGemma 1.5 natively processes 896×896; smaller values
+    # (e.g. 448 for constrained GPUs) trade detail for memory — see PROFILES.
     image_size: int = 896
     
     # LoRA
@@ -194,19 +206,22 @@ class Config:
     rsna_loss_weights: List[float] = field(default_factory=lambda: [1.0, 2.0, 4.0])
 
     def __post_init__(self):
-        # Apply a hardware profile if requested. Unknown PROFILE values are
-        # ignored loudly so a typo doesn't silently fall back to A100 defaults.
-        profile_name = os.environ.get("PROFILE")
-        if profile_name:
-            if profile_name not in PROFILES:
-                raise ValueError(
-                    f"PROFILE={profile_name!r} is not one of {list(PROFILES)}"
+        # Apply a hardware profile. Unknown PROFILE values are rejected loudly
+        # so a typo doesn't silently fall back to A100 defaults. When PROFILE
+        # is unset we default to `demo_a100_40g` — the Option 1A multi-modality
+        # config from FINE_TUNING_PLAN.md — because the bare dataclass defaults
+        # (1 sagittal T2 slice) can only honestly assess canal stenosis and
+        # would otherwise teach the model to hallucinate 20/25 labels.
+        profile_name = os.environ.get("PROFILE") or "demo_a100_40g"
+        if profile_name not in PROFILES:
+            raise ValueError(
+                f"PROFILE={profile_name!r} is not one of {list(PROFILES)}"
+            )
+        for key, value in PROFILES[profile_name].items():
+            if not hasattr(self, key):
+                raise AttributeError(
+                    f"Profile {profile_name!r} sets unknown Config field {key!r}"
                 )
-            for key, value in PROFILES[profile_name].items():
-                if not hasattr(self, key):
-                    raise AttributeError(
-                        f"Profile {profile_name!r} sets unknown Config field {key!r}"
-                    )
-                setattr(self, key, value)
+            setattr(self, key, value)
 
 cfg = Config()

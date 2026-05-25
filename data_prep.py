@@ -109,17 +109,17 @@ def select_representative_slices(
         return []
 
     if coord_rows is not None and len(coord_rows) > 0:
-        # Use the instance_number column (1-indexed) to identify annotated slices
+        # Use the instance_number column to identify annotated slices.
+        # We build an explicit inst→position map rather than assuming inst-1
+        # is the correct index (DICOM series can have non-contiguous numbers).
         if "instance_number" in coord_rows.columns:
             instance_nums = coord_rows["instance_number"].dropna().astype(int).unique()
-            # Map instance numbers to file indices (instance numbers are 1-indexed)
-            # Sort DICOM files by InstanceNumber tag if available
-            indexed = _sort_dcm_by_instance(dcm_files)
+            indexed, inst_to_idx = _build_inst_to_idx_map(dcm_files)
             selected_indices = []
             for inst in sorted(instance_nums):
-                idx = inst - 1  # convert 1-indexed → 0-indexed
-                if 0 <= idx < len(indexed):
-                    selected_indices.append(idx)
+                pos = inst_to_idx.get(int(inst))
+                if pos is not None:
+                    selected_indices.append(pos)
 
             # Spread the annotated slices evenly across the available range.
             if len(selected_indices) >= n_slices:
@@ -163,21 +163,205 @@ def select_representative_slices(
     return [usable[p] for p in positions]
 
 
-def _sort_dcm_by_instance(dcm_files: List[Path]) -> List[Path]:
-    """Sort DICOM files by InstanceNumber tag; fall back to filename sort."""
-    try:
-        tagged = []
-        for f in dcm_files:
-            try:
-                dcm = pydicom.dcmread(str(f), stop_before_pixels=True)
-                inst = int(getattr(dcm, "InstanceNumber", 9999))
-            except Exception:
-                inst = 9999
-            tagged.append((inst, f))
-        tagged.sort(key=lambda x: x[0])
-        return [f for _, f in tagged]
-    except Exception:
-        return sorted(dcm_files)
+def _build_inst_to_idx_map(
+    dcm_files: List[Path],
+) -> Tuple[List[Path], Dict[int, int]]:
+    """
+    Sort DICOM files by InstanceNumber and return a lookup from instance number
+    to position in the sorted list.
+
+    Using inst - 1 as a positional index is only correct when instance numbers
+    start at 1 and are contiguous. DICOM series can have gaps (e.g. 1, 3, 5…),
+    so we build an explicit mapping instead.
+
+    Returns:
+        sorted_files  — files sorted by InstanceNumber ascending
+        inst_to_idx   — {instance_number: index_in_sorted_files}
+    """
+    tagged: List[Tuple[int, Path]] = []
+    for f in dcm_files:
+        try:
+            dcm = pydicom.dcmread(str(f), stop_before_pixels=True)
+            inst = int(getattr(dcm, "InstanceNumber", 9999))
+        except Exception:
+            inst = 9999
+        tagged.append((inst, f))
+    tagged.sort(key=lambda x: x[0])
+    sorted_files = [f for _, f in tagged]
+    inst_to_idx: Dict[int, int] = {inst: i for i, (inst, _) in enumerate(tagged)}
+    return sorted_files, inst_to_idx
+
+
+# ── Multi-modality slice pickers (Option 1A) ─────────────────────────────────
+#
+# Each picker targets a specific MRI modality and returns the slices that give
+# the best coverage for the labels visible in that view:
+#
+#   _pick_midline_slice       — sagittal T2  → 1 midline slice (canal ×5)
+#   _pick_parasagittal_slices — sagittal T1  → 2 para-sagittal slices (foramina ×5 each)
+#   _pick_axial_per_level     — axial T2     → up to 5 slices (subarticular ×2×5)
+#
+# All three use _build_inst_to_idx_map so they are safe with non-contiguous
+# DICOM instance numbers.
+
+def _pick_midline_slice(
+    dcm_files: List[Path],
+    coord_rows: Optional[pd.DataFrame],
+    allow_no_coords: bool = False,
+) -> List[Path]:
+    """
+    Return 1 midline sagittal slice for canal stenosis assessment.
+
+    The midline is approximated by the median annotated instance number, which
+    clusters around the central canal in a sagittal T2 series. Falls back to
+    the physical midpoint of the series when no coordinates are available.
+    """
+    if not dcm_files:
+        return []
+    sorted_files, inst_to_idx = _build_inst_to_idx_map(dcm_files)
+
+    if coord_rows is not None and len(coord_rows) > 0 and "instance_number" in coord_rows.columns:
+        insts = coord_rows["instance_number"].dropna().astype(int).values
+        if len(insts) > 0:
+            median_inst = int(np.median(insts))
+            # Find the closest instance number we actually have
+            best = min(inst_to_idx.keys(), key=lambda x: abs(x - median_inst))
+            return [sorted_files[inst_to_idx[best]]]
+
+    if not allow_no_coords:
+        return []
+    return [sorted_files[len(sorted_files) // 2]]
+
+
+def _pick_parasagittal_slices(
+    dcm_files: List[Path],
+    coord_rows: Optional[pd.DataFrame],
+    allow_no_coords: bool = False,
+) -> List[Path]:
+    """
+    Return 2 para-sagittal slices (Q25 and Q75 of annotated instance numbers).
+
+    In a sagittal series the slice ordering runs laterally; the quartile
+    positions approximate the left and right para-sagittal planes where
+    neural foramina are visible. Falls back to the 1/4 and 3/4 positional
+    split of the series.
+    """
+    if not dcm_files:
+        return []
+    sorted_files, inst_to_idx = _build_inst_to_idx_map(dcm_files)
+    all_insts = sorted(inst_to_idx.keys())
+
+    if coord_rows is not None and len(coord_rows) > 0 and "instance_number" in coord_rows.columns:
+        insts = coord_rows["instance_number"].dropna().astype(int).values
+        if len(insts) >= 2:
+            q25 = int(np.percentile(insts, 25))
+            q75 = int(np.percentile(insts, 75))
+            best_q25 = min(all_insts, key=lambda x: abs(x - q25))
+            best_q75 = min(all_insts, key=lambda x: abs(x - q75))
+            # Return distinct slices; if quartiles map to the same file, keep one
+            seen: set = set()
+            result = []
+            for inst in [best_q25, best_q75]:
+                idx = inst_to_idx[inst]
+                if idx not in seen:
+                    seen.add(idx)
+                    result.append(sorted_files[idx])
+            return result
+        if len(insts) == 1:
+            # One annotation only — return that single slice rather than [].
+            # Some foraminal coverage beats zero coverage.
+            best = min(all_insts, key=lambda x: abs(x - int(insts[0])))
+            return [sorted_files[inst_to_idx[best]]]
+
+    if not allow_no_coords:
+        return []
+    n = len(sorted_files)
+    q1_idx, q3_idx = n // 4, 3 * n // 4
+    seen_idx: set = set()
+    result = []
+    for i in [q1_idx, q3_idx]:
+        if i not in seen_idx:
+            seen_idx.add(i)
+            result.append(sorted_files[i])
+    return result
+
+
+def _pick_axial_per_level(
+    dcm_files: List[Path],
+    coord_rows: Optional[pd.DataFrame],
+    allow_no_coords: bool = False,
+) -> List[Path]:
+    """
+    Return up to 5 axial slices — one per spinal level — for subarticular
+    stenosis and foraminal assessment at each disc level.
+
+    For each level in cfg.levels, we take the median annotated instance number
+    from the axial series. Levels without axial annotations are skipped (no
+    fabrication). Falls back to evenly-spaced slices when allow_no_coords=True.
+    """
+    if not dcm_files:
+        return []
+    sorted_files, inst_to_idx = _build_inst_to_idx_map(dcm_files)
+    all_insts = sorted(inst_to_idx.keys())
+
+    if coord_rows is not None and len(coord_rows) > 0 and "instance_number" in coord_rows.columns:
+        chosen_idx: List[int] = []
+        seen: set = set()
+        for level in cfg.levels:
+            level_rows = coord_rows[coord_rows["level"] == level]
+            if len(level_rows) == 0:
+                continue
+            insts = level_rows["instance_number"].dropna().astype(int).values
+            if len(insts) == 0:
+                continue
+            target = int(np.median(insts))
+            best = min(all_insts, key=lambda x: abs(x - target))
+            idx = inst_to_idx[best]
+            if idx not in seen:
+                seen.add(idx)
+                chosen_idx.append(idx)
+        if chosen_idx:
+            return [sorted_files[i] for i in chosen_idx]
+
+    if not allow_no_coords:
+        return []
+    n = len(sorted_files)
+    n_slices = min(5, n)
+    positions = np.linspace(0, n - 1, n_slices).round().astype(int)
+    return [sorted_files[p] for p in positions]
+
+
+def select_multiseries_slices(
+    series_type: str,
+    dcm_files: List[Path],
+    coord_rows: Optional[pd.DataFrame],
+    allow_no_coords: bool = False,
+) -> List[Path]:
+    """
+    Modality-aware dispatcher for multi-series (Option 1A) mode.
+
+    Picks slices the way a radiologist scrolls — targeting exactly the anatomy
+    each modality shows best:
+      sagittal_t2  →  1 midline slice          (canal stenosis at all 5 levels)
+      sagittal_t1  →  2 para-sagittal slices   (left/right foraminal narrowing)
+      axial_t2     →  up to 5 level slices     (subarticular stenosis per level)
+      other        →  1 centre slice            (generic fallback)
+
+    Called by prepare_dataset when cfg.max_series_per_study > 1.
+    For single-series profiles use select_representative_slices instead.
+    """
+    if series_type == "sagittal_t2":
+        return _pick_midline_slice(dcm_files, coord_rows, allow_no_coords)
+    elif series_type == "sagittal_t1":
+        return _pick_parasagittal_slices(dcm_files, coord_rows, allow_no_coords)
+    elif series_type == "axial_t2":
+        return _pick_axial_per_level(dcm_files, coord_rows, allow_no_coords)
+    else:
+        return select_representative_slices(
+            dcm_files, coord_rows,
+            n_slices=cfg.slices_per_series,
+            allow_no_coords=allow_no_coords,
+        )
 
 
 # ── DICOM → PNG conversion ────────────────────────────────────────────────────
@@ -201,18 +385,27 @@ def dicom_to_png(dcm_path: str, output_path: str,
         if hasattr(dcm, "RescaleSlope") and hasattr(dcm, "RescaleIntercept"):
             img = img * float(dcm.RescaleSlope) + float(dcm.RescaleIntercept)
 
-        # Apply VOI LUT (Window Center / Width) if available, else use percentile
+        # Apply VOI LUT (Window Center / Width) if available, else use percentile.
+        # WindowWidth==0 is degenerate (lo==hi → constant image) so we treat it
+        # as "no usable window" and fall through to the percentile branch.
+        lo = hi = None
         if hasattr(dcm, "WindowCenter") and hasattr(dcm, "WindowWidth"):
             wc = float(dcm.WindowCenter[0] if isinstance(dcm.WindowCenter, pydicom.multival.MultiValue)
                        else dcm.WindowCenter)
             ww = float(dcm.WindowWidth[0] if isinstance(dcm.WindowWidth, pydicom.multival.MultiValue)
                        else dcm.WindowWidth)
-            lo, hi = wc - ww / 2, wc + ww / 2
-        else:
+            if ww > 0:
+                lo, hi = wc - ww / 2, wc + ww / 2
+        if lo is None:
             lo, hi = np.percentile(img, [1, 99])
 
         img = np.clip(img, lo, hi)
         img = ((img - lo) / (hi - lo + 1e-8) * 255).astype(np.uint8)
+
+        # MONOCHROME1 stores pixels with high values = dark; invert so the PNG
+        # matches the MONOCHROME2 convention the vision encoder is trained on.
+        if str(getattr(dcm, "PhotometricInterpretation", "")).strip().upper() == "MONOCHROME1":
+            img = 255 - img
 
         # Resize to 896x896 using high-quality LANCZOS downsampling
         pil_img = Image.fromarray(img).convert("RGB")
@@ -230,8 +423,8 @@ def dicom_to_png(dcm_path: str, output_path: str,
 #
 # We cannot import the real processor here (data_prep runs without GPU deps),
 # but we can estimate tightly: SigLIP contributes (image_size/patch)² tokens
-# per image, and BPE text averages ~4 chars/token. Examples that exceed
-# cfg.max_seq_length - TOKEN_SAFETY_MARGIN are dropped before training.
+# per image, and BPE text averages ~3 chars/token (conservative upper bound).
+# Examples that exceed cfg.max_seq_length - TOKEN_SAFETY_MARGIN are dropped.
 
 def estimate_token_cost(n_images: int, text: str, image_size: int) -> int:
     """Conservative upper bound on the per-example token count."""
@@ -288,6 +481,25 @@ def max_severity_rank(labels: Dict[str, str]) -> int:
     return rank
 
 
+def build_user_prompt(n_images: int, series_types: Optional[List[str]] = None) -> str:
+    """
+    Build the user-turn text exactly as it appears in training examples.
+
+    Evaluation and comparison code must call this — not a paraphrase — so the
+    model sees the same prompt format at inference as during SFT. Any drift
+    silently degrades eval quality.
+    """
+    view_desc = (
+        ", ".join(t.replace("_", " ").title() for t in series_types)
+        if series_types else "MRI"
+    )
+    return (
+        f"You are provided with {n_images} lumbar spine MRI image(s) "
+        f"({view_desc}). Classify all degenerative conditions at each spinal "
+        f"level from L1/L2 to L5/S1.\n\n{SCHEMA_DESCRIPTION}"
+    )
+
+
 def build_instruction(
     study_id: int,
     image_paths: List[str],
@@ -301,16 +513,7 @@ def build_instruction(
     is a single compact JSON object so downstream parsing is `json.loads`
     rather than regex against multi-line prose.
     """
-    view_desc = (
-        ", ".join(t.replace("_", " ").title() for t in series_types)
-        if series_types else "MRI"
-    )
-
-    user_prompt = (
-        f"You are provided with {len(image_paths)} lumbar spine MRI image(s) "
-        f"({view_desc}). Classify all degenerative conditions at each spinal "
-        f"level from L1/L2 to L5/S1.\n\n{SCHEMA_DESCRIPTION}"
-    )
+    user_prompt = build_user_prompt(len(image_paths), series_types)
 
     user_content: List[dict] = [{"type": "image"} for _ in image_paths]
     user_content.append({"type": "text", "text": user_prompt})
@@ -465,16 +668,33 @@ def prepare_dataset(
             series_map = {"unknown": [int(d.name) for d in series_dirs if d.is_dir()]}
 
         # ── Select series to include (up to max_series_per_study) ────────
+        # Modality-balanced selection: take ONE series of each modality first
+        # so all three views (sagittal T2 / sagittal T1 / axial T2) reach the
+        # model before we duplicate a modality. The previous "append all of
+        # type A, then all of type B, then truncate" loop could silently drop
+        # axial_t2 entirely for studies with multiple sagittal_t2 series,
+        # defeating Option 1A's 25-label coverage.
         selected_series: List[Tuple[str, int]] = []  # (series_type, series_id)
+        # Pass 1: one per known modality in priority order.
         for stype in SERIES_PRIORITY:
-            if stype in series_map:
-                for sid in series_map[stype]:
+            if series_map.get(stype):
+                selected_series.append((stype, series_map[stype][0]))
+                if len(selected_series) >= cfg.max_series_per_study:
+                    break
+        # Pass 2: fill remaining slots with extra series of known modalities.
+        if len(selected_series) < cfg.max_series_per_study:
+            for stype in SERIES_PRIORITY:
+                for sid in series_map.get(stype, [])[1:]:
                     selected_series.append((stype, sid))
-        # Add any unknown series not yet included
+                    if len(selected_series) >= cfg.max_series_per_study:
+                        break
+                if len(selected_series) >= cfg.max_series_per_study:
+                    break
+        # Pass 3: unknown series last.
         for sid in series_map.get("unknown", []):
+            if len(selected_series) >= cfg.max_series_per_study:
+                break
             selected_series.append(("unknown", sid))
-
-        selected_series = selected_series[: cfg.max_series_per_study]
 
         if not selected_series:
             continue
@@ -501,12 +721,18 @@ def prepare_dataset(
             else:
                 coord_rows = None
 
-            # Select representative slices
-            chosen_slices = select_representative_slices(
-                dcm_files, coord_rows,
-                n_slices=cfg.slices_per_series,
-                allow_no_coords=allow_no_coords,
-            )
+            # Select slices: multi-modality picker (Option 1A) when more than
+            # one series is requested; single-series legacy picker otherwise.
+            if cfg.max_series_per_study > 1:
+                chosen_slices = select_multiseries_slices(
+                    series_type, dcm_files, coord_rows, allow_no_coords
+                )
+            else:
+                chosen_slices = select_representative_slices(
+                    dcm_files, coord_rows,
+                    n_slices=cfg.slices_per_series,
+                    allow_no_coords=allow_no_coords,
+                )
 
             if not chosen_slices:
                 continue  # study had no coordinates; skip (see flag above)
