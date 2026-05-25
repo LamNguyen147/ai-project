@@ -14,7 +14,7 @@ End-to-end guide to set up and run this project on a RunPod GPU pod. The codebas
 
 Suggested RunPod template settings:
 
-- **Image:** `runpod/pytorch:2.4.0-py3.11-cuda12.1.1-devel-ubuntu22.04` (or any PyTorch ≥ 2.1 / CUDA ≥ 12.1 image).
+- **Image:** pick the **latest RunPod PyTorch image with CUDA 12.6 or higher** (cu126 or cu128). Do **not** use a CUDA 12.1 or 12.4 image — `unsloth-zoo` requires `torchao >= 0.13.0` which requires PyTorch 2.7+, and PyTorch 2.7 wheels only ship for CUDA 12.6+. `setup.sh` auto-detects your CUDA version, skips the torch install if you already have 2.7+, and tries cu128 → cu126 → cu124 as a fallback chain.
 - **Container disk:** 50 GB minimum.
 - **Volume disk:** 200 GB+ recommended (RSNA DICOMs are ~35 GB, PNGs add another ~15 GB at 448², checkpoints add ~20 GB per run).
 - **Volume mount path:** `/workspace` (matches the project's default `WORKSPACE`).
@@ -74,6 +74,7 @@ mkdir -p /workspace/data/rsna-2024-lumbar-spine
 cd /workspace/data/rsna-2024-lumbar-spine
 
 kaggle competitions download -c rsna-2024-lumbar-spine-degenerative-classification
+apt-get update -qq && apt-get install -y -qq unzip
 unzip -q rsna-2024-lumbar-spine-degenerative-classification.zip
 rm rsna-2024-lumbar-spine-degenerative-classification.zip
 ```
@@ -137,6 +138,28 @@ Expected runtime on A100 40 GB (`demo_a100_40g`, ~2,000 studies, 3 epochs): roug
 
 If the pod restarts mid-training, just run `python train.py` again — it auto-resumes from the latest `checkpoint-*` directory.
 
+### Keep training alive after disconnecting
+
+Training runs as a child of your SSH/VSCode session — closing the connection kills it. Use **tmux** to detach it:
+
+```bash
+tmux new -s train    # start a named session
+
+# inside tmux — start training with logging to file
+PROFILE=a100_80g_multimodal python train.py 2>&1 | tee /workspace/logs/train.log
+
+# detach (training keeps running): Ctrl+B then D
+
+# reconnect later
+tmux attach -t train
+```
+
+`tmux` is installed by `setup.sh`. You can also tail the log from a separate terminal without attaching:
+
+```bash
+tail -f /workspace/logs/train.log
+```
+
 ### W&B logging (optional)
 
 If `WANDB_API_KEY` is exported, training reports to W&B under project `medgemma-lumbar-spine`. Otherwise reporting is disabled.
@@ -197,3 +220,6 @@ Writes the merged model to `/workspace/models/medgemma-lumbar/merged/`. This is 
 | Training OOMs on A100 40 GB                                             | You're on the wrong profile. Confirm `PROFILE=demo_a100_40g` (default) or `PROFILE=a100_40g`. Don't run `a100_80g` on 40 GB. |
 | Eval shows ~85% accuracy but Kappa near 0                               | Parse-failure fallback is masking bad output. Check `parse_failure_rate` in `metrics.json`.                              |
 | Avg images per example ≈ 3 on `demo_a100_40g`                           | Axial picker is returning empty. Make sure `train_label_coordinates.csv` is in the data dir and you have the latest `data_prep.py` (level-format normalization). |
+| `unzip: command not found`                                              | Run `apt-get update && apt-get install -y unzip` first. `setup.sh` does this automatically on fresh pods. |
+| `AttributeError: module 'torch' has no attribute 'int1'` or `register_constant` | PyTorch version is too old. `unsloth-zoo` requires torch 2.7+ via `torchao>=0.13.0`. Run `pip install "torch>=2.7.0" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126`, then reinstall unsloth. |
+| `unsloth-zoo requires transformers<=5.5.0 but you have transformers X.Y` | pip resolved too-new transformers. Run `pip install "transformers>=4.56.1,!=4.57.4,!=4.57.5,!=5.0.0,!=5.1.0,<=5.5.0"`. |
