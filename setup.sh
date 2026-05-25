@@ -31,16 +31,16 @@ pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 # redirect operator (which would silently drop everything after the first
 # package on each line and create stray files named '=4.45.0' etc.).
 pip install \
-    "transformers>=4.45.0,<4.50" \
-    "trl>=0.11.0,<0.12" \
+    "transformers>=4.51.3,!=4.52.0,!=4.52.1,!=4.52.2,!=4.52.3,!=4.53.0,!=4.54.0,!=4.55.0,!=4.55.1,!=4.57.4,!=4.57.5,!=5.0.0,!=5.1.0" \
+    "trl>=0.18.2,!=0.19.0,<=0.24.0" \
     "datasets>=2.20.0" \
     "pillow>=10.0.0" \
     "pydicom>=2.4.0" \
     "scikit-learn>=1.5.0" \
     "kaggle" \
-    "accelerate>=0.34,<1.0" \
+    "accelerate>=1.0" \
     "bitsandbytes>=0.43.1" \
-    "peft>=0.11,<0.14" \
+    "peft>=0.18.0" \
     "scipy" \
     "matplotlib" \
     "seaborn" \

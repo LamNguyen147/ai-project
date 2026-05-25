@@ -100,7 +100,7 @@ The legacy key `rsna_weighted_log_loss` is kept as an alias for backward compati
 - Generative classification is fragile. A classification head on pooled vision features would give calibrated probabilities and make the RSNA log-loss real (Option 3 in `FINE_TUNING_PLAN.md`; sketched as `train_head.py` in the roadmap, not implemented).
 - The `a100_40g`, `a100_80g`, and `rtx_4090` profiles all use one series (sagittal T2 only), so on those profiles only canal stenosis is honestly assessed — foraminal and subarticular labels are guessed from the class prior. Use `demo_a100_40g` (the default) or `a100_80g_multimodal` for honest 25-label coverage.
 - `--allow-no-coords` is documented but unsafe to use for real training runs.
-- `SFTTrainer(tokenizer=…)` is deprecated in `trl ≥ 0.13`; pinned to `>= 0.11, < 0.12` in `setup.sh` so it still works. Loosening the pin will require switching to `processing_class=`.
+- `train.py` uses `SFTConfig` (trl ≥ 0.16) and `processing_class=` (trl ≥ 0.15). The old `SFTTrainer(tokenizer=…, max_seq_length=…)` API no longer works with current unsloth-zoo; both are now updated.
 
 ## Repository layout
 

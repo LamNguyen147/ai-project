@@ -18,8 +18,8 @@ from unsloth import FastVisionModel
 from unsloth.trainer import UnslothVisionDataCollator
 from PIL import Image
 from datasets import Dataset
-from transformers import TrainingArguments, EarlyStoppingCallback
-from trl import SFTTrainer
+from transformers import EarlyStoppingCallback
+from trl import SFTConfig, SFTTrainer
 from config import cfg, set_seed
 
 # Module-level reference populated in main(); used by the data collator.
@@ -196,7 +196,10 @@ def main():
 
     # Training arguments
     print("\n[4/5] Setting up training...")
-    training_args = TrainingArguments(
+    # SFTConfig extends TrainingArguments and owns the SFT-specific knobs
+    # (max_seq_length, packing, dataset_text_field). trl >= 0.16 moved these
+    # out of SFTTrainer.__init__ into SFTConfig to keep the trainer clean.
+    training_args = SFTConfig(
         output_dir=cfg.output_dir,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         per_device_eval_batch_size=1,
@@ -217,14 +220,15 @@ def main():
         load_best_model_at_end=cfg.load_best_model_at_end,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        # HF Transformers expects the literal string "none", not the list
-        # ["none"] (which is parsed as a reporter named "none" and errors on
-        # newer versions).
         report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
         run_name="medgemma-lumbar-spine-finetune",
         dataloader_num_workers=0,   # 0 avoids multiprocessing issues with PIL images
         remove_unused_columns=False,
         seed=cfg.seed,
+        # SFT-specific — moved from SFTTrainer kwargs in trl >= 0.16
+        max_seq_length=cfg.max_seq_length,
+        packing=False,              # must be False for vision models
+        dataset_text_field=None,    # we use a custom data collator
     )
 
     # BUG FIX v3.0: Use UnslothVisionDataCollator instead of a bare custom
@@ -236,16 +240,16 @@ def main():
     data_collator = UnslothVisionDataCollator(model, tokenizer)
 
     # SFT Trainer
+    # trl >= 0.15 renamed `tokenizer` to `processing_class`; SFT-specific
+    # kwargs (max_seq_length, packing, dataset_text_field) now live in
+    # SFTConfig above, so they are omitted here.
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         args=training_args,
         data_collator=data_collator,
-        dataset_text_field=None,    # We use custom collator
-        max_seq_length=cfg.max_seq_length,
-        packing=False,              # Must be False for vision models
     )
 
     # Stop training if eval loss stops improving. Pairs with
