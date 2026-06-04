@@ -1,0 +1,103 @@
+BASE vs FINE-TUNED: Response Examples
+================================================================================
+
+Example 1 — Study ID: 1324569502
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 2 — Study ID: 4287160193
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"M","lf":"N","rf":"N","ls":"S","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L4L5":{"canal":"N","lf":"M","rf":"N","ls":"M","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 3 — Study ID: 4189246764
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"M"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"M"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 4 — Study ID: 2851955958
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 5 — Study ID: 3427409235
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+

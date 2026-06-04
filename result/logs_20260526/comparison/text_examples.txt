@@ -1,0 +1,127 @@
+BASE vs FINE-TUNED: Response Examples
+================================================================================
+
+Example 1 — Study ID: 1524089207
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","rs":"N"},"L4L5":{"canal":"N","lf":"M","rf":"N","rs":"M"},"L5S1":{"canal":"N","lf":"S","rf":"S","rs":"M"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 2 — Study ID: 454297464
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"M","lf":"M","rf":"N","ls":"S","rs":"S"},"L5S1":{"canal":"M","lf":"M","rf":"M","ls":"N","rs":"S"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 3 — Study ID: 806480418
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"M"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"S"},"L5S1":{"canal":"N","lf":"M","rf":"N","ls":"N","rs":"M"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+**Note:** The provided images are MRI scans of the lumbar spine. The analysis is based on the visual inspection of the images. The classification is based on the typical appearance of degenerative changes in the lumbar spine.
+
+**Disclaimer:** This analysis is based on the provided images and is not a substitute for a professional medical diagnosis. A qualified healthcare professional should be consulted for any medical concerns.
+
+**Analysis:**
+
+*   **L1-L2:** No significant degenerative changes are visible.
+*   **L2-L3:** No significant degenerative changes are visible.
+*   **L3-L4:** No significant degenerative changes are visible.
+*   **L4-L5:** No significant degenerative changes are visible.
+*   **L5-S1:** No significant degenerative changes are visible.
+
+**Conclusion:**
+
+Based on the provided images, there are no significant degenerative changes visible at any of the lumbar spine levels.
+
+**Disclaimer:** This analysis is based on the provided images and is not a substitute for a professional medical diagnosis. A qualified healthcare professional should be consulted for any medical concerns.
+
+**Note:** The provided images are MRI scans of the lumbar spine. The analysis is based on the visual inspection of the images. The classification is based on the typical appearance of degenerative changes in the lumbar spine.
+
+**Disclaimer:** This analysis is based on the provided images and is not a substitute for a professional medical diagnosis. A qualified healthcare professional should be consulted for any medical concerns.
+
+**Note:** The provided images are MRI scans of the lumbar spine. The
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"M","lf":"N","rf":"N","ls":"S","rs":"M"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 4 — Study ID: 838134337
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"M","ls":"N","rs":"N"},"L4L5":{"canal":"S","lf":"S","rf":"S","ls":"S","rs":"S"},"L5S1":{"canal":"N","lf":"M","rf":"N","ls":"N","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"S","lf":"N","rf":"N","ls":"S","rs":"S"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+
+Example 5 — Study ID: 347228139
+------------------------------------------------------------
+GROUND TRUTH:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"M","rf":"M","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"M","ls":"M","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"M","rs":"N"}}
+
+BASE MODEL:
+{
+"L1L2": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L2L3": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L3L4": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L4L5": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"},
+"L5S1": {"canal": "N", "lf": "N", "rf": "N", "ls": "N", "rs": "N"}
+}
+```
+
+FINE-TUNED:
+{"L1L2":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L2L3":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L3L4":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L4L5":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"},"L5S1":{"canal":"N","lf":"N","rf":"N","ls":"N","rs":"N"}}
+
+================================================================================
+

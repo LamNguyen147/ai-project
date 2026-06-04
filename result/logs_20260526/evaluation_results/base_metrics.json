@@ -1,0 +1,20 @@
+{
+  "overall_accuracy": 0.78,
+  "overall_f1_weighted": 0.6835955056179776,
+  "overall_kappa": 0.0,
+  "rsna_weighted_score_proxy": 6.6682201272757275,
+  "rsna_weighted_log_loss": 6.6682201272757275,
+  "weighted_accuracy": 0.5862898376428142,
+  "spinal_canal_stenosis_avg_accuracy": 0.8960000000000001,
+  "spinal_canal_stenosis_avg_kappa": 0.0,
+  "left_neural_foraminal_narrowing_avg_accuracy": 0.79,
+  "left_neural_foraminal_narrowing_avg_kappa": 0.0,
+  "right_neural_foraminal_narrowing_avg_accuracy": 0.792,
+  "right_neural_foraminal_narrowing_avg_kappa": 0.0,
+  "left_subarticular_stenosis_avg_accuracy": 0.712,
+  "left_subarticular_stenosis_avg_kappa": 0.0,
+  "right_subarticular_stenosis_avg_accuracy": 0.71,
+  "right_subarticular_stenosis_avg_kappa": 0.0,
+  "parse_failure_rate": 0.0,
+  "parse_failure_count": 0
+}
