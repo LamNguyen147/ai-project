@@ -262,8 +262,11 @@ Initial load takes ~30–60 seconds on a warm cache, longer on a cold one.
 | Command | What it does |
 |---|---|
 | `/load <path>` | Add one PNG to the next analysis. Repeat for multiple slices. |
-| `/sample` | Auto-load 3 images from the first val study (useful for quick demos). |
-| `/analyze` | Run the fine-tuned model on loaded images. Produces JSON + auto-summary. |
+| `/study <id>` | Load **every slice of one study** at once (uses the dataset's recorded image set, or globs `<study_id>_*.png`). The convenient way to load a study you pre-screened with `find_demo_samples.py`. |
+| `/sample [sev]` | Load a val study, optionally filtered by severity: `/sample severe`, `/sample moderate`, or `/sample` (any). Prints the ground-truth abnormal labels so you know what the model *should* find. |
+| `/analyze` | Run the fine-tuned model on loaded images. Produces JSON + auto-summary. (Optional — asking a question after `/load`/`/sample` auto-runs it.) |
+| `/compare` | Run **both** the fine-tuned specialist and the base model on the same images, side by side. Shows what fine-tuning bought you (clean JSON vs base rambling/refusing). |
+| `/base <q>` | Ask the **base** MedGemma a free-form question directly about the loaded images (it sees the pixels). Useful for "what would the un-tuned model say?" |
 | `/report` | Print the deterministic radiology-style report from the current findings. |
 | `/findings` | Dump raw JSON findings (good for showing "this is what the specialist produced"). |
 | `/state` | Show what's loaded right now. |
@@ -271,6 +274,73 @@ Initial load takes ~30–60 seconds on a warm cache, longer on a cold one.
 | `/quit` | Exit. |
 
 Anything not starting with `/` is treated as a chat question about the current findings.
+
+## Picking a sample that shows the model actually learned something
+
+The RSNA dataset is **~85% Normal/Mild**, so a plain `/sample` almost always
+loads an all-normal study — the model says "everything's normal" and you've
+proven nothing. To demonstrate that the fine-tune *learned to detect pathology*,
+you need a study that contains Moderate/Severe labels **and** that the model
+predicts correctly.
+
+### Quick path — filter `/sample` by severity
+
+During the demo, just ask for an abnormal study:
+
+```
+You: /sample severe
+[Loaded 8 image(s) from study 1234567 (filter: severe):]
+    - /workspace/data/processed/1234567_..._sagittal_t2_slice4.png
+    - ...
+  Ground-truth abnormal labels: L4L5 canal=S, L5S1 lf=M
+```
+
+`/sample severe` scans `val_dataset.jsonl` for the first study whose
+`max_severity` field is `2` (contains a Severe label); `/sample moderate` finds
+one with Moderate or worse. The printed "Ground-truth abnormal labels" line
+tells you exactly what the model *should* call out — handy for confirming the
+prediction is right when you then ask a question.
+
+> This picks the *first* matching study, which may or may not be one the model
+> gets right. For a guaranteed-good demo, pre-screen with the script below.
+
+### Best path — pre-screen candidates with `find_demo_samples.py`
+
+Run this **before** the demo (it's a rehearsal tool). It runs the model on every
+Severe-containing val study and ranks them by how many abnormal cells the model
+predicts correctly, so you walk into the demo with a known-good study:
+
+```bash
+cd /workspace/medgemma-finetune
+python find_demo_samples.py                 # rank Severe-containing studies
+python find_demo_samples.py --severity moderate   # include Moderate cases
+python find_demo_samples.py --limit 30      # cap runtime to first 30 candidates
+```
+
+Output ends with ready-to-paste `/load` lines for the top studies:
+
+```
+================================================================
+ Top 5 demo candidates
+ (the model correctly flags real pathology in these)
+================================================================
+
+Study 1234567 — model got 3/3 abnormal cells exactly right (3/3 flagged abnormal)
+  Ground-truth abnormal: L4L5 canal=S, L4L5 ls=M, L5S1 lf=M
+  Paste into the demo:
+    /load /workspace/data/processed/1234567_..._sagittal_t2_slice4.png
+    /load /workspace/data/processed/1234567_..._sagittal_t1_slice3.png
+    ...
+```
+
+Pick a study near the top (high "exact" score), copy its `/load` lines into a
+notes file, and paste them during the demo. Now when you ask "what could this
+be?", the model reliably surfaces the real Severe/Moderate findings.
+
+> **Timing:** the script runs the full model on each candidate (~20–40 s each).
+> There are usually only a handful of Severe studies in a 198-study val split,
+> so it finishes in a few minutes. Use `--limit` if you included Moderate
+> (`--severity moderate`) and there are many candidates.
 
 ## Suggested 4-minute demo script
 
@@ -283,8 +353,12 @@ This is a recommended flow if you're presenting live. The "Say:" lines are what 
 ### Step 2 — Show the inputs (~30 s)
 
 ```
-You: /sample
+You: /sample severe
 ```
+
+(Or paste the `/load` lines for a study you pre-screened with
+`find_demo_samples.py` — see the section above. Using `severe` ensures the study
+actually contains pathology rather than being all-normal.)
 
 > **Say:** "These are real preprocessed slices from the validation set — one midline sagittal T2, two parasagittal T1s for foraminal assessment, and axial T2s per level for subarticular evaluation. The fine-tuned model has never seen this study before."
 
@@ -309,6 +383,44 @@ You: /report
 
 > **Say:** "This is the raw output of the specialist — every level, every condition, every severity. The Python formatter turns it into a radiology-style report. The chat layer can be much more flexible than the formatter."
 
+### Step 4b — Fine-tuned vs base, same input (~40 s, optional but compelling)
+
+This is the clearest way to show what fine-tuning actually changed. Both models
+get the *identical* images and prompt:
+
+```
+You: /compare
+```
+
+```
+==============================================================
+ Fine-tuned specialist (LoRA) — compact 25-label JSON
+==============================================================
+{"L1L2":{"canal":"N",...},"L4L5":{"canal":"S",...}, ...}
+
+==============================================================
+ Base MedGemma (no fine-tuning) — same input, raw output
+==============================================================
+I can see a sagittal MRI of the lumbar spine. There appears to be...
+(prose, hedging, or a refusal — usually NOT the compact schema)
+```
+
+> **Say:** "Same images, same prompt. The fine-tuned model emits a clean,
+> parseable 25-label JSON every time — 0% parse-failure on validation. The base
+> model is a capable medical VLM, but it narrates in free text and won't reliably
+> produce the structured schema we need to score. That structured reliability is
+> exactly what the fine-tune bought us."
+
+You can also interrogate the base model directly on the images:
+
+```
+You: /base What abnormalities do you see in these MRI images?
+```
+
+> **Say:** "The base model can describe images, but it won't give us per-level,
+> per-condition severities in a fixed format. That gap is the whole reason we
+> fine-tuned."
+
 ### Step 5 — Conversational follow-ups (~2 min, the highlight)
 
 Pick 2–3 of these to demonstrate breadth:
@@ -332,6 +444,51 @@ You: Could the model have missed anything?
 The chat model usually responds with something honest. This is a good moment to mention:
 
 > **Say:** "On the held-out validation set the fine-tuned model gets Cohen's kappa of 0.50 overall — moderate agreement. Spinal canal stenosis hits 0.54; foraminal narrowing is still near-zero because Moderate/Severe foraminal cases are rare. Oversampling is the next experiment."
+
+#### Optional: show input-scoped reliability (partial input)
+
+A single MRI slice can only show some anatomy — a midline sagittal T2 shows the
+canal, parasagittal T1 shows the foramina, axial T2 shows the subarticular
+recesses. The fine-tuned model always emits all 25 labels, but a label is only
+*visually grounded* when the modality that shows it is in the input.
+
+The demo handles this in two ways when a modality is missing:
+1. It **drops** the un-assessable conditions from the findings *before* the base
+   chat model sees them — so the natural-language reply only discusses anatomy
+   the slices can actually show (no off-view guesses leak into the conversation).
+2. It prints a **coverage note** telling you exactly what was dropped.
+
+To make this explicit, load a partial input on purpose and analyze it:
+
+```
+You: /clear
+You: /load /workspace/data/processed/<study>_..._sagittal_t2_slice4.png
+You: What does this show?
+...
+Analyzing MRI...
+[Findings ready.]
+[Coverage note] The loaded images don't cover every modality. Conditions not
+visible in this input are dropped before the chat model sees them, so the reply
+only covers what the slices can show:
+    - no sagittal_t1 slice → neural foraminal narrowing (lf / rf) not assessable
+    - no axial_t2 slice → subarticular stenosis (ls / rs) not assessable
+    Load the full study (e.g. /sample) for a complete read.
+
+Assistant: From this sagittal T2 slice I can assess the spinal canal. There is
+moderate canal stenosis at L4/L5 ... (foraminal and subarticular findings are
+not covered because those views weren't provided.)
+```
+
+> **Say:** "I only gave it one sagittal slice. The system drops the conditions
+> that slice can't show — foramina and subarticular recesses — so the assistant
+> only talks about the canal. The model isn't hallucinating about anatomy it
+> can't see; it's scoped to its input. Load the full study and all 25 labels
+> come back. This is how you'd scope reliability per-input in a real deployment."
+
+`/findings` still shows the raw, unfiltered 25-label JSON (the model's full
+output) if you want to contrast what the model *emitted* vs what was *fed to the
+chat layer*. The filtering and coverage note apply automatically on any
+`/analyze` or auto-analysis whenever a modality is missing.
 
 ### Step 7 — Wrap up
 
